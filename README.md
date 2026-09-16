@@ -28,6 +28,11 @@ trust any third-party plugin.
    your password/app-password when prompted. Point it at a folder your mail
    client already files "things to act on" into — the plugin has no filter
    language of its own by design (see Scope below).
+5. On the issue provider itself (not this plugin's own config screen), the
+   host app requires three settings before it will poll automatically:
+   **Auto import to backlog**, a **default project**, and polling mode
+   **Always** (if you want it to run without that project being open). The
+   manifest can only pre-select the first of these.
 
 ## Scope
 
@@ -46,7 +51,7 @@ trust any third-party plugin.
 
 ## How it hangs together
 
-```
+```text
 plugin.js (app renderer)                      spawned Node process
 ┌────────────────────────────┐                ┌──────────────────────┐
 │ registerIssueProvider      │  executeNode   │ worker (CJS bundle,  │
