@@ -1,0 +1,24 @@
+{
+  "name": "imap-inbox-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Super Productivity plugin: turns new mail in a watched IMAP folder into tasks",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "package": "node scripts/build.js && node scripts/package-zip.js",
+    "test": "node scripts/build.js && vitest run && node --test test/*.test.cjs",
+    "test:unit": "vitest run",
+    "test:integration": "node scripts/build.js && node --test test/*.test.cjs",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "esbuild": "^0.28.1",
+    "typescript": "^5.8.3",
+    "vitest": "^4.1.0"
+  },
+  "dependencies": {
+    "@super-productivity/plugin-api": "^1.0.1"
+  }
+}

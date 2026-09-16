@@ -1,0 +1,9 @@
+# Build artifacts: the worker bundle and the generated string it is embedded as.
+dist/
+dist-worker/
+src/generated/
+
+node_modules/
+coverage/
+*.log
+.DS_Store

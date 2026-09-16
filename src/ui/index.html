@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>IMAP Inbox</title>
+    <style>
+      /*
+       * UI Kit provides base element styles (body, headings, buttons, inputs).
+       * Only layout and plugin-specific rules here.
+       */
+      body {
+        padding: var(--s3);
+        background: transparent;
+      }
+
+      .container {
+        max-width: 620px;
+        margin: 0 auto;
+      }
+
+      .subtitle {
+        color: var(--text-color-muted);
+        margin-bottom: var(--s3);
+      }
+
+      .account {
+        border: 1px solid var(--separator-color);
+        border-radius: var(--card-border-radius, 4px);
+        padding: var(--s2);
+        margin-bottom: var(--s2);
+      }
+
+      .account-title {
+        font-weight: 500;
+        margin-bottom: var(--s-half);
+      }
+
+      .account-meta {
+        color: var(--text-color-muted);
+        font-size: 0.85em;
+        margin-bottom: var(--s);
+      }
+
+      .badge {
+        display: inline-block;
+        font-size: 0.75em;
+        padding: 0 var(--s-half);
+        border-radius: 8px;
+        border: 1px solid var(--separator-color);
+      }
+
+      .form-group {
+        margin-bottom: var(--s2);
+      }
+
+      label {
+        display: block;
+        font-weight: 500;
+        margin-bottom: var(--s-half);
+        color: var(--text-color-muted);
+      }
+
+      .row {
+        display: flex;
+        gap: var(--s2);
+        flex-wrap: wrap;
+      }
+
+      .row > * {
+        flex: 1 1 180px;
+      }
+
+      .button-group {
+        display: flex;
+        gap: var(--s);
+        flex-wrap: wrap;
+      }
+
+      .help-text {
+        font-size: 0.85em;
+        color: var(--text-color-muted);
+        margin-top: var(--s-half);
+      }
+
+      .status {
+        display: none;
+        margin: var(--s2) 0;
+        padding: var(--s);
+        border-radius: 4px;
+        border: 1px solid var(--separator-color);
+      }
+
+      .status.show {
+        display: block;
+      }
+
+      .status.error {
+        border-color: var(--c-warn, #c00);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h1>IMAP Inbox</h1>
+      <p class="subtitle">
+        Passwords are stored on this device only. They are never synced, exported, or
+        included in a backup — so each device needs its own copy.
+      </p>
+
+      <div
+        id="status"
+        class="status"
+      ></div>
+
+      <section
+        id="desktop-warning"
+        hidden
+      >
+        <p>
+          This plugin needs a direct connection to your mail server, which only the
+          desktop app can open. Nothing to configure here.
+        </p>
+      </section>
+
+      <section
+        id="main"
+        hidden
+      >
+        <h2>Accounts</h2>
+        <p
+          id="no-accounts"
+          class="help-text"
+          hidden
+        >
+          No account yet. Add the IMAP provider under Settings → Issue integrations first,
+          then set its password below.
+        </p>
+        <div id="accounts"></div>
+
+        <h2>Set a password</h2>
+        <p class="help-text">
+          Use the same server, port and username you entered on the issue provider. Most
+          providers want an app-specific password here, not your main one.
+        </p>
+
+        <div class="row">
+          <div class="form-group">
+            <label for="host">IMAP server</label>
+            <input
+              id="host"
+              type="text"
+              placeholder="imap.example.com"
+              autocomplete="off"
+            />
+          </div>
+          <div class="form-group">
+            <label for="username">Username</label>
+            <input
+              id="username"
+              type="text"
+              placeholder="you@example.com"
+              autocomplete="off"
+            />
+          </div>
+        </div>
+
+        <div class="row">
+          <div class="form-group">
+            <label for="security">Security</label>
+            <select id="security">
+              <option value="implicit-tls">TLS (993)</option>
+              <option value="starttls">STARTTLS (143)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label for="port">Port</label>
+            <input
+              id="port"
+              type="text"
+              inputmode="numeric"
+              placeholder="993"
+            />
+          </div>
+          <div class="form-group">
+            <label for="folder">Folder</label>
+            <input
+              id="folder"
+              type="text"
+              placeholder="INBOX"
+            />
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="password">Password</label>
+          <input
+            id="password"
+            type="password"
+            autocomplete="off"
+          />
+        </div>
+
+        <div class="form-group">
+          <label>
+            <input
+              id="allowSelfSigned"
+              type="checkbox"
+            />
+            Accept a self-signed certificate
+          </label>
+        </div>
+
+        <div class="button-group">
+          <button
+            id="save"
+            type="button"
+          >
+            Save password
+          </button>
+          <button
+            id="test"
+            type="button"
+          >
+            Test connection
+          </button>
+        </div>
+      </section>
+    </div>
+
+    <script>
+      const byId = (id) => document.getElementById(id);
+
+      function sendMessage(message) {
+        return new Promise((resolve, reject) => {
+          const messageId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+          const timeout = setTimeout(() => {
+            window.removeEventListener('message', handler);
+            reject(new Error('The app did not answer in time'));
+          }, 30000);
+
+          const handler = (event) => {
+            if (event.data?.messageId !== messageId) {
+              return;
+            }
+            clearTimeout(timeout);
+            window.removeEventListener('message', handler);
+            if (event.data.type === 'PLUGIN_MESSAGE_ERROR') {
+              reject(new Error(event.data.error || 'Unknown error'));
+              return;
+            }
+            resolve(event.data.response ?? event.data);
+          };
+
+          window.addEventListener('message', handler);
+          window.parent.postMessage({ type: 'PLUGIN_MESSAGE', message, messageId }, '*');
+        });
+      }
+
+      function showStatus(message, type = 'info') {
+        const status = byId('status');
+        status.textContent = message;
+        status.className = `status ${type} show`;
+        if (type !== 'error') {
+          setTimeout(() => status.classList.remove('show'), 5000);
+        }
+      }
+
+      function readForm() {
+        return {
+          host: byId('host').value,
+          username: byId('username').value,
+          port: byId('port').value,
+          folder: byId('folder').value,
+          security: byId('security').value,
+          allowSelfSigned: byId('allowSelfSigned').checked,
+        };
+      }
+
+      function fillForm(account) {
+        byId('host').value = account.host;
+        byId('username').value = account.username;
+        byId('port').value = account.port;
+        byId('folder').value = account.folder;
+        byId('security').value = account.security;
+        byId('allowSelfSigned').checked = !!account.allowSelfSigned;
+        byId('password').value = '';
+        byId('password').focus();
+      }
+
+      function renderAccounts(accounts) {
+        const list = byId('accounts');
+        list.textContent = '';
+        byId('no-accounts').hidden = accounts.length > 0;
+
+        accounts.forEach((account) => {
+          const card = document.createElement('div');
+          card.className = 'account';
+
+          const title = document.createElement('div');
+          title.className = 'account-title';
+          // textContent, never innerHTML: these values come from a mail server.
+          title.textContent = account.label;
+          card.appendChild(title);
+
+          const meta = document.createElement('div');
+          meta.className = 'account-meta';
+          meta.textContent = `${account.folder} · port ${account.port} · ${account.security}`;
+          card.appendChild(meta);
+
+          const badge = document.createElement('span');
+          badge.className = 'badge';
+          badge.textContent = account.hasPassword ? 'password set' : 'no password';
+          card.appendChild(badge);
+
+          const buttons = document.createElement('div');
+          buttons.className = 'button-group';
+          buttons.style.marginTop = 'var(--s)';
+
+          const edit = document.createElement('button');
+          edit.type = 'button';
+          edit.textContent = account.hasPassword ? 'Replace password' : 'Set password';
+          edit.addEventListener('click', () => fillForm(account));
+          buttons.appendChild(edit);
+
+          if (account.hasPassword) {
+            const clear = document.createElement('button');
+            clear.type = 'button';
+            clear.textContent = 'Remove password';
+            clear.addEventListener('click', () => clearPassword(account));
+            buttons.appendChild(clear);
+          }
+
+          card.appendChild(buttons);
+          list.appendChild(card);
+        });
+      }
+
+      async function refresh() {
+        const state = await sendMessage({ type: 'getState' });
+        byId('desktop-warning').hidden = !!state.isDesktop;
+        byId('main').hidden = !state.isDesktop;
+        if (state.isDesktop) {
+          renderAccounts(state.accounts || []);
+        }
+      }
+
+      async function clearPassword(account) {
+        try {
+          await sendMessage({ type: 'clearPassword', account });
+          showStatus('Password removed from this device.');
+          await refresh();
+        } catch (err) {
+          showStatus(err.message, 'error');
+        }
+      }
+
+      byId('save').addEventListener('click', async () => {
+        const password = byId('password').value;
+        if (!password) {
+          showStatus('Enter a password first.', 'error');
+          return;
+        }
+        try {
+          await sendMessage({ type: 'setPassword', account: readForm(), password });
+          byId('password').value = '';
+          showStatus('Password saved on this device.');
+          await refresh();
+        } catch (err) {
+          showStatus(err.message, 'error');
+        }
+      });
+
+      byId('test').addEventListener('click', async () => {
+        showStatus('Connecting…');
+        try {
+          const res = await sendMessage({
+            type: 'testAccount',
+            account: readForm(),
+            password: byId('password').value || undefined,
+          });
+          showStatus(`Connected. "${res.folder}" holds ${res.messageCount} message(s).`);
+        } catch (err) {
+          showStatus(err.message, 'error');
+        }
+      });
+
+      refresh().catch((err) => showStatus(err.message, 'error'));
+    </script>
+  </body>
+</html>

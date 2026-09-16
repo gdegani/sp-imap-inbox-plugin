@@ -1,0 +1,39 @@
+{
+  "id": "imap-inbox",
+  "name": "IMAP Inbox",
+  "version": "1.0.0",
+  "manifestVersion": 1,
+  "minSupVersion": "19.0.0",
+  "description": "Watches one IMAP folder and turns every message that arrives after setup into a task. Imported mail is flagged as read. Desktop only.",
+  "author": "Super Productivity",
+  "homepage": "https://github.com/super-productivity/super-productivity",
+  "type": "issueProvider",
+  "icon": "icon.svg",
+  "iFrame": true,
+  "permissions": [
+    "nodeExecution",
+    "persistDataSynced",
+    "loadSyncedData",
+    "setSecret",
+    "getSecret",
+    "deleteSecret",
+    "registerHook",
+    "onMessage",
+    "showSnack"
+  ],
+  "nodeScriptConfig": {
+    "timeout": 25000,
+    "memoryLimit": "128MB"
+  },
+  "hooks": ["taskCreated"],
+  "issueProvider": {
+    "pollIntervalMs": 300000,
+    "icon": "mail",
+    "humanReadableName": "IMAP",
+    "issueStrings": {
+      "singular": "Message",
+      "plural": "Messages"
+    },
+    "defaultAutoAddToBacklog": true
+  }
+}
