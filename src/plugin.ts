@@ -7,6 +7,7 @@ import type {
 } from './types/issue-provider-types';
 import { WORKER_SCRIPT } from './generated/worker-source';
 import { MessageCache } from './host/message-cache';
+import { describeNodeScriptError } from './host/node-script-error';
 import {
   isWatermarkUnchanged,
   nextWatermark,
@@ -169,13 +170,6 @@ const connectionFor = async (
 
 // --- worker bridge -----------------------------------------------------------
 
-const describeError = (error: NodeScriptResult['error']): string => {
-  if (typeof error === 'string') {
-    return error;
-  }
-  return error?.message ?? 'Unknown error';
-};
-
 const callWorker = async <T>(request: WorkerRequest): Promise<T> => {
   if (!PluginAPI.executeNodeScript) {
     throw new Error(DESKTOP_ONLY_MSG);
@@ -186,7 +180,7 @@ const callWorker = async <T>(request: WorkerRequest): Promise<T> => {
     timeout: NODE_TIMEOUT_MS,
   });
   if (!res.success) {
-    throw new Error(describeError(res.error));
+    throw new Error(describeNodeScriptError(res.error));
   }
   return res.result as T;
 };

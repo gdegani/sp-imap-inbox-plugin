@@ -252,7 +252,9 @@
               reject(new Error(event.data.error || 'Unknown error'));
               return;
             }
-            resolve(event.data.response ?? event.data);
+            // The host wraps a successful reply as
+            // { type: 'PLUGIN_MESSAGE_RESPONSE', messageId, result }.
+            resolve(event.data.result);
           };
 
           window.addEventListener('message', handler);
