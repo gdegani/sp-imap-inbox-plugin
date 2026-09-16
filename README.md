@@ -13,7 +13,7 @@ trust any third-party plugin.
 ## Install
 
 1. Download `plugin.zip` from the
-   [latest release](../../releases/latest).
+   [latest release](https://github.com/gdegani/sp-imap-inbox-plugin/releases/latest).
 2. In Super Productivity: **Settings → Plugins → Choose Plugin File**, select
    the zip, then enable it.
 3. It requests `nodeExecution` to speak raw IMAP over TLS. The app will show

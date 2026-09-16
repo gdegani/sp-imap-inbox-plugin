@@ -6,7 +6,9 @@
   "license": "Apache-2.0",
   "scripts": {
     "build": "node scripts/build.js",
+    "check": "node scripts/release-check.js",
     "package": "node scripts/build.js && node scripts/package-zip.js",
+    "release:check": "npm run typecheck && npm run build && npm run check",
     "test": "node scripts/build.js && vitest run && node --test test/*.test.cjs",
     "test:unit": "vitest run",
     "test:integration": "node scripts/build.js && node --test test/*.test.cjs",
