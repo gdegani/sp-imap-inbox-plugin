@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "description": "Super Productivity plugin: turns new mail in a watched IMAP folder into tasks",
+  "license": "Apache-2.0",
   "scripts": {
     "build": "node scripts/build.js",
     "package": "node scripts/build.js && node scripts/package-zip.js",

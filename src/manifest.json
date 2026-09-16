@@ -19,7 +19,9 @@
     "deleteSecret",
     "registerHook",
     "onMessage",
-    "showSnack"
+    "showSnack",
+    "getAllProjects",
+    "addTask"
   ],
   "nodeScriptConfig": {
     "timeout": 25000,

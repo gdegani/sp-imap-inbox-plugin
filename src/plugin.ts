@@ -13,6 +13,7 @@ import {
   nextWatermark,
   parseWatermark,
   serializeWatermark,
+  type WatermarkState,
 } from './host/watermark';
 import { accountLabel, secretKeyFor, watermarkKeyFor } from './shared/keys';
 import type {
@@ -52,6 +53,8 @@ declare const PluginAPI: {
   persistDataSynced(dataStr: string, key?: string): Promise<void>;
   loadSyncedData(key?: string): Promise<string | null>;
   showSnack(cfg: { msg: string; type?: 'SUCCESS' | 'ERROR' | 'WARNING' | 'INFO' }): void;
+  getAllProjects(): Promise<{ id: string; title: string }[]>;
+  addTask(taskData: { title: string; projectId?: string; notes?: string }): Promise<string>;
   log: {
     log: (...args: unknown[]) => void;
     info: (...args: unknown[]) => void;
@@ -442,7 +445,15 @@ PluginAPI.registerIssueProvider({
   async testConnection(config: Record<string, unknown>): Promise<boolean> {
     const conn = await connectionFor(config);
     const res = await callWorker<TestResult>({ op: 'test', conn });
-    return res.status.uidValidity > 0;
+    const ok = res.status.uidValidity > 0;
+    if (ok) {
+      // The config dialog has no custom-button extension point, only fixed
+      // field types — "Test connection" is the one action button the host
+      // already renders there for every issue provider, so a mail preview
+      // rides along on it instead of needing a UI this plugin can't add.
+      await reportPreviewSnack(conn);
+    }
+    return ok;
   },
 
   async searchIssues(
@@ -578,6 +589,7 @@ interface UiMessage {
   type: string;
   account?: UiAccount;
   password?: string;
+  projectId?: string;
 }
 
 const asAccount = (account: UiAccount | undefined): UiAccount => {
@@ -595,6 +607,57 @@ const asAccount = (account: UiAccount | undefined): UiAccount => {
     security,
     allowSelfSigned: account.allowSelfSigned === true,
   };
+};
+
+const resolvePassword = async (
+  account: UiAccount,
+  typed: string | undefined,
+): Promise<string> => {
+  const password = typed || (await PluginAPI.getSecret(secretKeyFor(account)));
+  if (!password) {
+    throw new Error('No password stored for this account yet');
+  }
+  return password;
+};
+
+/**
+ * Same watermark-gated poll `getNewIssuesForBacklog` runs, reused by the
+ * manual "Check mailbox now" / "Import new mail now" buttons. Read-only by
+ * itself — callers decide whether/how far to advance the watermark.
+ */
+const pollAccount = async (
+  account: UiAccount,
+  password: string,
+): Promise<{ key: string; current: WatermarkState | null; poll: PollResult }> => {
+  const key = watermarkKeyFor(account, account.folder);
+  const current = parseWatermark(await PluginAPI.loadSyncedData(key));
+  const poll = await callWorker<PollResult>({
+    op: 'poll',
+    conn: { ...account, password },
+    sinceUid: current?.lastUid ?? null,
+    uidValidity: current?.uidValidity ?? null,
+    maxMessages: MAX_MESSAGES_PER_POLL,
+  });
+  return { key, current, poll };
+};
+
+/**
+ * Read-only preview shown as a snack after a successful `testConnection`.
+ * Never persists the watermark — this is a preview, not an import; the
+ * automatic poll and "Import new mail now" are what actually move it.
+ */
+const reportPreviewSnack = async (conn: ImapConnectionCfg): Promise<void> => {
+  try {
+    const { poll } = await pollAccount(conn, conn.password);
+    const msg = poll.isReset
+      ? 'Connected. No baseline yet for this mailbox — mail from now on will show as new.'
+      : poll.messages.length === 0
+        ? 'Connected. No new mail since the last check.'
+        : `Connected. ${poll.messages.length} new message(s) waiting to import.`;
+    PluginAPI.showSnack({ msg, type: 'SUCCESS' });
+  } catch (err) {
+    PluginAPI.log.warn('[imap-inbox] could not preview new mail during test', err);
+  }
 };
 
 PluginAPI.onMessage?.(async (raw: unknown) => {
@@ -628,11 +691,7 @@ PluginAPI.onMessage?.(async (raw: unknown) => {
     }
     case 'testAccount': {
       const account = asAccount(message.account);
-      const password =
-        message.password || (await PluginAPI.getSecret(secretKeyFor(account)));
-      if (!password) {
-        throw new Error('No password stored for this account yet');
-      }
+      const password = await resolvePassword(account, message.password);
       const res = await callWorker<TestResult>({
         op: 'test',
         conn: { ...account, password },
@@ -642,6 +701,75 @@ PluginAPI.onMessage?.(async (raw: unknown) => {
         folder: account.folder,
         messageCount: res.status.exists,
       };
+    }
+    case 'getProjects': {
+      const projects = await PluginAPI.getAllProjects();
+      return { projects: projects.map((p) => ({ id: p.id, title: p.title })) };
+    }
+    case 'previewNewMail': {
+      const account = asAccount(message.account);
+      const password = await resolvePassword(account, message.password);
+      const { poll } = await pollAccount(account, password);
+      if (poll.isReset) {
+        return { isReset: true, messages: [] };
+      }
+      return {
+        isReset: false,
+        messages: poll.messages.map((m) => ({
+          subject: m.subject,
+          from: m.from,
+          dateStr: m.dateStr,
+        })),
+      };
+    }
+    case 'importNewMailNow': {
+      const account = asAccount(message.account);
+      const projectId = message.projectId?.trim();
+      if (!projectId) {
+        throw new Error('Choose a project first');
+      }
+      const password = await resolvePassword(account, message.password);
+      const { key, current, poll } = await pollAccount(account, password);
+
+      if (poll.isReset) {
+        await PluginAPI.persistDataSynced(
+          serializeWatermark(nextWatermark(current, poll, Date.now())),
+          key,
+        );
+        return { created: 0, isReset: true };
+      }
+
+      // Create tasks one at a time and track how many actually succeeded, so
+      // a failure partway through never advances the watermark past mail
+      // that has no task yet — a later check picks up exactly where this
+      // one stopped instead of silently skipping it.
+      let created = 0;
+      try {
+        for (const m of poll.messages) {
+          await PluginAPI.addTask({
+            title: m.subject,
+            projectId,
+            notes:
+              `From: ${m.from}\nDate: ${m.dateStr}\n\n` +
+              'Imported manually via "Import new mail now" in IMAP Inbox. ' +
+              'Unlike an automatic import, this task is not linked back to the ' +
+              'message and is not marked read automatically.',
+          });
+          created += 1;
+        }
+      } finally {
+        if (created > 0) {
+          const next = nextWatermark(
+            current,
+            { ...poll, messages: poll.messages.slice(0, created) },
+            Date.now(),
+          );
+          if (!isWatermarkUnchanged(current, next)) {
+            await PluginAPI.persistDataSynced(serializeWatermark(next), key);
+          }
+        }
+      }
+      return { created, isReset: false };
     }
     default:
       throw new Error(`Unknown message "${String(message?.type)}"`);

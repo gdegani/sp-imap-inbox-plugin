@@ -39,15 +39,52 @@ trust any third-party plugin.
 - **Reads:** message headers only (`Message-ID`, `Subject`, `From`, `To`,
   `Date`) via `BODY.PEEK`, from one folder of one account per provider
   instance.
-- **Writes:** exactly one thing — `\Seen` on a message that became a task.
-  No deletes, no moves, no other flags. Polling opens the mailbox with
-  `EXAMINE` (read-only), so it cannot change anything even by accident; only
-  the mark-as-read path uses `SELECT`.
+- **Writes:** `\Seen` on a message that became a task via the automatic
+  import — no deletes, no moves, no other flags. Polling opens the mailbox
+  with `EXAMINE` (read-only), so it cannot change anything even by accident;
+  only the mark-as-read path uses `SELECT`. Separately, the credentials
+  view's manual **"Import new mail now"** button creates a plain task per
+  new message directly (see "Manual controls" below) — that's a task-list
+  write, not a mailbox write.
 - **Does not do:** bodies, attachments, IDLE/push, OAuth, multiple folders,
   mailbox listing, sending, or any filtering beyond the choice of folder. A
   mail-client rule that files actionable mail into a dedicated folder, which
   this plugin then watches, beats any in-app filtering language — so that's
   the intended workflow rather than a missing feature.
+
+## Manual controls
+
+The credentials view (`src/ui/index.html`) has two buttons for checking a
+mailbox without waiting for the next automatic poll, next to the existing
+**"Test connection"**:
+
+- **"Check mailbox now"** — read-only. Runs the same watermark-gated poll
+  the automatic import uses and lists what it would find as new, without
+  creating anything or moving the watermark.
+- **"Import new mail now"** — creates a plain task per new message in a
+  project you pick right there, and advances the watermark by exactly how
+  many tasks it actually created (so a failure partway through never skips
+  the rest on the next check). This is a manual shortcut for testing, not a
+  replacement for the automatic import: unlike an automatically-imported
+  task, these aren't linked back to the message (no from/date fields, no
+  "view issue" panel) and aren't flagged `\Seen` automatically, since both
+  of those depend on the host's own issue-provider linkage, which a plugin
+  can't set through the public `addTask` API.
+
+Both require a password already entered or saved in the form above them,
+same as "Test connection". `Import new mail now` additionally needs the
+`getAllProjects` and `addTask` permissions (declared in `manifest.json`),
+which is why upgrading from an older install may show a new permission
+prompt.
+
+A preview is also available from the issue provider's own settings dialog
+(Project → issue integration), without opening the credentials view at all:
+the host renders a **"Test connection"** button there for any provider that
+implements `testConnection`, and a successful test now also shows a snack
+with a mail count (e.g. "Connected. 3 new message(s) waiting to import.").
+That dialog has no extension point for a custom button — only fixed field
+types — so this is the closest a plugin can get to "a check button in the
+issue provider panel."
 
 ## How it hangs together
 

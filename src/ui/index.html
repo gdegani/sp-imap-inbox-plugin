@@ -227,7 +227,38 @@
           >
             Test connection
           </button>
+          <button
+            id="preview"
+            type="button"
+          >
+            Check mailbox now
+          </button>
         </div>
+
+        <h2>Import now</h2>
+        <p class="help-text">
+          A shortcut for testing, not a replacement for the automatic poll. Tasks
+          created this way are plain tasks — no sender/date fields, and they are
+          not flagged read automatically. The normal 5-minute poll creates fully
+          linked tasks once the account is saved and the issue provider itself is
+          configured (see README "Install", step 5).
+        </p>
+        <div class="form-group">
+          <label for="importProject">Project</label>
+          <select id="importProject">
+            <option value="">Loading projects…</option>
+          </select>
+        </div>
+        <div class="button-group">
+          <button
+            id="importNow"
+            type="button"
+          >
+            Import new mail now
+          </button>
+        </div>
+
+        <div id="preview-results"></div>
       </section>
     </div>
 
@@ -322,6 +353,14 @@
           buttons.className = 'button-group';
           buttons.style.marginTop = 'var(--s)';
 
+          if (account.hasPassword) {
+            const check = document.createElement('button');
+            check.type = 'button';
+            check.textContent = 'Check mailbox';
+            check.addEventListener('click', () => checkAccountMailbox(account));
+            buttons.appendChild(check);
+          }
+
           const edit = document.createElement('button');
           edit.type = 'button';
           edit.textContent = account.hasPassword ? 'Replace password' : 'Set password';
@@ -337,6 +376,27 @@
           }
 
           card.appendChild(buttons);
+
+          if (account.hasPassword) {
+            const importRow = document.createElement('div');
+            importRow.className = 'button-group';
+            importRow.style.marginTop = 'var(--s)';
+
+            const projectSelect = document.createElement('select');
+            populateProjectSelect(projectSelect);
+            importRow.appendChild(projectSelect);
+
+            const importBtn = document.createElement('button');
+            importBtn.type = 'button';
+            importBtn.textContent = 'Import new mail now';
+            importBtn.addEventListener('click', () =>
+              importAccountMailNow(account, projectSelect.value),
+            );
+            importRow.appendChild(importBtn);
+
+            card.appendChild(importRow);
+          }
+
           list.appendChild(card);
         });
       }
@@ -346,8 +406,88 @@
         byId('desktop-warning').hidden = !!state.isDesktop;
         byId('main').hidden = !state.isDesktop;
         if (state.isDesktop) {
+          // Load first: renderAccounts builds a project picker per card and
+          // needs cachedProjects already populated.
+          await loadProjects();
           renderAccounts(state.accounts || []);
         }
+      }
+
+      let cachedProjects = [];
+
+      function populateProjectSelect(select, failed) {
+        select.textContent = '';
+        if (failed) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'Could not load projects';
+          select.appendChild(opt);
+          return;
+        }
+        if (cachedProjects.length === 0) {
+          const opt = document.createElement('option');
+          opt.value = '';
+          opt.textContent = 'No projects found';
+          select.appendChild(opt);
+          return;
+        }
+        cachedProjects.forEach((project) => {
+          const opt = document.createElement('option');
+          opt.value = project.id;
+          opt.textContent = project.title;
+          select.appendChild(opt);
+        });
+      }
+
+      async function loadProjects() {
+        try {
+          const { projects } = await sendMessage({ type: 'getProjects' });
+          cachedProjects = projects || [];
+          populateProjectSelect(byId('importProject'));
+        } catch (err) {
+          cachedProjects = [];
+          populateProjectSelect(byId('importProject'), true);
+        }
+      }
+
+      function renderPreview(result) {
+        const container = byId('preview-results');
+        container.textContent = '';
+
+        if (result.isReset) {
+          const p = document.createElement('p');
+          p.className = 'help-text';
+          p.textContent =
+            'No baseline yet for this mailbox — this first check just set one, so nothing is reported as "new" yet. Run it again after new mail arrives.';
+          container.appendChild(p);
+          return;
+        }
+
+        const heading = document.createElement('p');
+        heading.className = 'help-text';
+        heading.textContent =
+          result.messages.length === 0
+            ? 'No new mail since the last check.'
+            : `${result.messages.length} new message(s):`;
+        container.appendChild(heading);
+
+        result.messages.forEach((message) => {
+          const row = document.createElement('div');
+          row.className = 'account';
+
+          const title = document.createElement('div');
+          title.className = 'account-title';
+          // textContent, never innerHTML: these values come from a mail server.
+          title.textContent = message.subject;
+          row.appendChild(title);
+
+          const meta = document.createElement('div');
+          meta.className = 'account-meta';
+          meta.textContent = [message.from, message.dateStr].filter(Boolean).join(' · ');
+          row.appendChild(meta);
+
+          container.appendChild(row);
+        });
       }
 
       async function clearPassword(account) {
@@ -355,6 +495,44 @@
           await sendMessage({ type: 'clearPassword', account });
           showStatus('Password removed from this device.');
           await refresh();
+        } catch (err) {
+          showStatus(err.message, 'error');
+        }
+      }
+
+      async function checkAccountMailbox(account) {
+        showStatus(`Checking ${account.label}…`);
+        byId('preview-results').textContent = '';
+        try {
+          // No `password` field: the host falls back to the stored secret,
+          // so this works straight from the account card.
+          const res = await sendMessage({ type: 'previewNewMail', account });
+          showStatus(`Checked ${account.label}.`);
+          renderPreview(res);
+          byId('preview-results').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        } catch (err) {
+          showStatus(err.message, 'error');
+        }
+      }
+
+      async function importAccountMailNow(account, projectId) {
+        if (!projectId) {
+          showStatus('Choose a project first.', 'error');
+          return;
+        }
+        showStatus(`Importing from ${account.label}…`);
+        try {
+          const res = await sendMessage({ type: 'importNewMailNow', account, projectId });
+          byId('preview-results').textContent = '';
+          if (res.isReset) {
+            showStatus(
+              `First check for ${account.label} — nothing to import yet, mail from now on will be.`,
+            );
+          } else if (res.created === 0) {
+            showStatus(`No new mail to import from ${account.label}.`);
+          } else {
+            showStatus(`Imported ${res.created} task(s) from ${account.label}.`);
+          }
         } catch (err) {
           showStatus(err.message, 'error');
         }
@@ -385,6 +563,51 @@
             password: byId('password').value || undefined,
           });
           showStatus(`Connected. "${res.folder}" holds ${res.messageCount} message(s).`);
+        } catch (err) {
+          showStatus(err.message, 'error');
+        }
+      });
+
+      byId('preview').addEventListener('click', async () => {
+        showStatus('Checking…');
+        byId('preview-results').textContent = '';
+        try {
+          const res = await sendMessage({
+            type: 'previewNewMail',
+            account: readForm(),
+            password: byId('password').value || undefined,
+          });
+          showStatus('Check complete.');
+          renderPreview(res);
+        } catch (err) {
+          showStatus(err.message, 'error');
+        }
+      });
+
+      byId('importNow').addEventListener('click', async () => {
+        const projectId = byId('importProject').value;
+        if (!projectId) {
+          showStatus('Choose a project first.', 'error');
+          return;
+        }
+        showStatus('Importing…');
+        try {
+          const res = await sendMessage({
+            type: 'importNewMailNow',
+            account: readForm(),
+            password: byId('password').value || undefined,
+            projectId,
+          });
+          byId('preview-results').textContent = '';
+          if (res.isReset) {
+            showStatus(
+              'First check for this mailbox — nothing to import yet, mail from now on will be.',
+            );
+          } else if (res.created === 0) {
+            showStatus('No new mail to import.');
+          } else {
+            showStatus(`Imported ${res.created} task(s).`);
+          }
         } catch (err) {
           showStatus(err.message, 'error');
         }
