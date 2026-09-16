@@ -56,7 +56,8 @@ export type WorkerRequest =
       /** Guard: refuse to STORE if the mailbox was recreated under us. */
       uidValidity: number;
       uids: number[];
-    };
+    }
+  | { op: 'body'; conn: ImapConnectionCfg; uid: number };
 
 export interface TestResult {
   status: MailboxStatus;
@@ -89,4 +90,18 @@ export interface MarkSeenResult {
   markedUids: number[];
   /** Non-empty only when UIDVALIDITY no longer matches; nothing was written. */
   skippedUids: number[];
+}
+
+/**
+ * Body text is plain-only by design (HTML is stripped, never rendered) — see
+ * README "Scope". Attachments are listed by name/size straight off
+ * BODYSTRUCTURE; file content is never fetched.
+ */
+export interface MessageBodyResult {
+  status: MailboxStatus;
+  /** Absent when the message has no text part, or it exceeded the size cap. */
+  bodyText?: string;
+  /** True when the text part existed but was skipped (too large) or cut short. */
+  bodyTruncated: boolean;
+  attachments: { filename: string; size: number }[];
 }

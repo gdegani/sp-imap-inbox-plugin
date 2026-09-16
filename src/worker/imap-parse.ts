@@ -81,6 +81,20 @@ export interface FetchRecord {
 
 const BODY_SECTION = /BODY\[[^\]]*\](?:<\d+>)?\s+(\u0001\d+\u0001|"(?:[^"\\]|\\.)*")/;
 
+const resolveLiteralOrQuoted = (raw: string, literals: string[]): string => {
+  const tokenMatch = LITERAL_TOKEN_RE.exec(raw);
+  if (tokenMatch) {
+    return literals[Number(tokenMatch[1])] ?? '';
+  }
+  return raw.slice(1, -1).replace(/\\(.)/g, '$1');
+};
+
+/** Pull a `BODY[<section>]` value (literal or quoted) out of any FETCH response line. */
+export const extractBodySectionValue = (line: ImapLine): string | null => {
+  const match = BODY_SECTION.exec(line.text);
+  return match ? resolveLiteralOrQuoted(match[1], line.literals) : null;
+};
+
 /**
  * Pull the fields we ask for out of a `* n FETCH (...)` response. Servers are
  * free to reorder items and to add unsolicited ones (FLAGS after a STORE, say),
@@ -94,17 +108,9 @@ export const parseFetchRecord = (line: ImapLine): FetchRecord | null => {
   if (!uidMatch) {
     return null;
   }
-  const bodyMatch = BODY_SECTION.exec(line.text);
-  if (!bodyMatch) {
+  const header = extractBodySectionValue(line);
+  if (header === null) {
     return null;
-  }
-
-  let header: string;
-  const tokenMatch = LITERAL_TOKEN_RE.exec(bodyMatch[1]);
-  if (tokenMatch) {
-    header = line.literals[Number(tokenMatch[1])] ?? '';
-  } else {
-    header = bodyMatch[1].slice(1, -1).replace(/\\(.)/g, '$1');
   }
 
   const dateMatch = /\bINTERNALDATE "([^"]*)"/i.exec(line.text);

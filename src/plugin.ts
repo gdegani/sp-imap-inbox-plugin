@@ -21,6 +21,7 @@ import type {
   ImapMessage,
   ImapSecurity,
   MarkSeenResult,
+  MessageBodyResult,
   MessagesResult,
   PollResult,
   TestResult,
@@ -429,7 +430,40 @@ const issueDisplay: PluginIssueField[] = [
   { field: 'to', label: 'To', hideEmpty: true },
   { field: 'dateStr', label: 'Date', hideEmpty: true },
   { field: 'folder', label: 'Folder', hideEmpty: true },
+  // 'text', not 'markdown': HTML is deliberately stripped to plain text (see
+  // README "Scope"), and markdown rendering could reinterpret a stray
+  // "*"/"_"/"#" from the mail as formatting.
+  { field: 'body', label: 'Body', type: 'text', hideEmpty: true },
 ];
+
+const formatBytes = (bytes: number): string => {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(0)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+/** Body text plus an attachment listing (filenames/sizes only — see README "Scope"). */
+const formatIssueBody = (result: MessageBodyResult): string | undefined => {
+  const sections: string[] = [];
+  if (result.bodyText) {
+    sections.push(
+      result.bodyTruncated ? `${result.bodyText}\n\n[…message truncated]` : result.bodyText,
+    );
+  } else if (result.bodyTruncated) {
+    sections.push('[Message body too large to preview]');
+  }
+  if (result.attachments.length > 0) {
+    const list = result.attachments
+      .map((a) => `📎 ${a.filename} (${formatBytes(a.size)})`)
+      .join('\n');
+    sections.push(`Attachments:\n${list}`);
+  }
+  return sections.length > 0 ? sections.join('\n\n') : undefined;
+};
 
 PluginAPI.registerIssueProvider({
   configFields,
@@ -478,30 +512,47 @@ PluginAPI.registerIssueProvider({
 
   async getById(issueId: string, config: Record<string, unknown>): Promise<PluginIssue> {
     const base = readConfig(config);
-    const cached = cache.get(issueId);
-    if (cached) {
-      return toIssue(cached, base.folder);
+    let found = cache.get(issueId);
+    if (!found) {
+      try {
+        await refillCacheOnce(config);
+      } catch (err) {
+        PluginAPI.log.warn('[imap-inbox] could not refresh the message cache', err);
+      }
+      found = cache.get(issueId);
     }
+    if (!found) {
+      // The message is gone from the watched folder (moved, deleted, archived
+      // by the user). `lastUpdated: 0` is load-bearing: the host only applies
+      // issue data when it is NEWER than the task's, so this placeholder can
+      // never overwrite the task's title. It exists so the detail panel says
+      // something honest instead of erroring on every refresh.
+      return {
+        id: issueId,
+        title: 'Message is no longer in the watched folder',
+        folder: base.folder,
+        lastUpdated: 0,
+      } as PluginIssue;
+    }
+
+    const issue = toIssue(found, base.folder);
+    // Body/attachments are fetched here, not during the poll: most imported
+    // mail is never opened, so paying for it only when the issue panel is
+    // actually viewed keeps the routine 5-minute poll cheap. A fetch failure
+    // (network hiccup, message gone, oversized) must not break the rest of
+    // the panel — headers still display even without a body.
     try {
-      await refillCacheOnce(config);
+      const conn = await connectionFor(config);
+      const bodyResult = await callWorker<MessageBodyResult>({
+        op: 'body',
+        conn,
+        uid: found.uid,
+      });
+      issue.body = formatIssueBody(bodyResult);
     } catch (err) {
-      PluginAPI.log.warn('[imap-inbox] could not refresh the message cache', err);
+      PluginAPI.log.warn('[imap-inbox] could not fetch the message body', err);
     }
-    const found = cache.get(issueId);
-    if (found) {
-      return toIssue(found, base.folder);
-    }
-    // The message is gone from the watched folder (moved, deleted, archived by
-    // the user). `lastUpdated: 0` is load-bearing: the host only applies issue
-    // data when it is NEWER than the task's, so this placeholder can never
-    // overwrite the task's title. It exists so the detail panel says something
-    // honest instead of erroring on every refresh.
-    return {
-      id: issueId,
-      title: 'Message is no longer in the watched folder',
-      folder: base.folder,
-      lastUpdated: 0,
-    } as PluginIssue;
+    return issue;
   },
 
   async getNewIssuesForBacklog(

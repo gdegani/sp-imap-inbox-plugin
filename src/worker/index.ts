@@ -1,11 +1,14 @@
 import type {
   ImapMessage,
   MarkSeenResult,
+  MessageBodyResult,
   MessagesResult,
   PollResult,
   TestResult,
   WorkerRequest,
 } from '../shared/types';
+import { parseBodyStructure, selectAttachments, selectTextPart } from './body-structure';
+import { renderBodyText } from './body-text';
 import { ImapClient } from './imap-client';
 import { buildUidSet, FetchRecord, parseInternalDateMs } from './imap-parse';
 import { quoteImapString } from './mailbox-name';
@@ -22,6 +25,14 @@ const DEADLINE_MS = 20_000;
 const MAX_MARK_SEEN = 200;
 /** Upper bound on Message-ID lookups per call (one SEARCH each). */
 const MAX_LOOKUPS = 25;
+/**
+ * Checked against BODYSTRUCTURE's reported size *before* fetching, so an
+ * oversized text part is skipped instead of tripping the client's 1MB literal
+ * guard — which destroys the whole connection, not just this one call.
+ */
+const MAX_BODY_FETCH_BYTES = 200 * 1024;
+/** Attachments are listed from BODYSTRUCTURE only; content is never fetched. */
+const MAX_ATTACHMENTS_LISTED = 20;
 
 const toMessage = (record: FetchRecord, uidValidity: number): ImapMessage => {
   const headers = parseHeaderBlock(record.header);
@@ -165,6 +176,44 @@ const markSeen = async (
   return { markedUids: uids, skippedUids: [] };
 };
 
+const body = async (
+  client: ImapClient,
+  req: Extract<WorkerRequest, { op: 'body' }>,
+): Promise<MessageBodyResult> => {
+  const status = await client.openMailbox(req.conn.folder);
+  const structureLine = await client.uidFetchBodyStructure(req.uid);
+  if (!structureLine) {
+    return { status, bodyTruncated: false, attachments: [] };
+  }
+
+  const parts = parseBodyStructure(structureLine.text, structureLine.literals);
+  const textPart = selectTextPart(parts);
+  const attachments = selectAttachments(
+    parts,
+    textPart?.partNumber ?? null,
+    MAX_ATTACHMENTS_LISTED,
+  );
+
+  if (!textPart || textPart.size > MAX_BODY_FETCH_BYTES) {
+    // No usable text part, or it's too large to be worth fetching — report
+    // what we know (attachments came for free from BODYSTRUCTURE) rather
+    // than failing the whole call.
+    return { status, bodyTruncated: !!textPart, attachments };
+  }
+
+  const raw = await client.uidFetchBodyPart(req.uid, textPart.partNumber);
+  if (raw == null) {
+    return { status, bodyTruncated: false, attachments };
+  }
+  const { text, truncated } = renderBodyText(
+    raw,
+    textPart.encoding,
+    textPart.charset,
+    textPart.subtype === 'HTML',
+  );
+  return { status, bodyText: text, bodyTruncated: truncated, attachments };
+};
+
 /**
  * Single entry point. The host executes this module's source inside a spawned
  * Node process and uses the return value as the script result, so nothing here
@@ -190,6 +239,8 @@ export const run = async (req: WorkerRequest): Promise<unknown> => {
         return await lookup(client, req);
       case 'markSeen':
         return await markSeen(client, req);
+      case 'body':
+        return await body(client, req);
       default: {
         const unknown = req as { op: string };
         throw new Error(`Unknown operation "${unknown.op}"`);

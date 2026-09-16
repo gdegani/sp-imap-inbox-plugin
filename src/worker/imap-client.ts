@@ -3,6 +3,7 @@ import * as tls from 'tls';
 import type { ImapConnectionCfg, MailboxStatus } from '../shared/types';
 import { encodeMailboxName, quoteImapString } from './mailbox-name';
 import {
+  extractBodySectionValue,
   FetchRecord,
   ImapLine,
   literalToken,
@@ -33,8 +34,9 @@ export interface ExecResult {
 
 /**
  * A minimal IMAP4rev1 client: enough to open a mailbox read-only, list new
- * UIDs, pull headers, and flag messages as read. No IDLE (the host spawns a
- * fresh process per call), no body fetching, no mailbox listing.
+ * UIDs, pull headers, fetch a single message's body/attachment list on
+ * demand, and flag messages as read. No IDLE (the host spawns a fresh
+ * process per call), no mailbox listing.
  */
 export class ImapClient {
   private socket!: net.Socket | tls.TLSSocket;
@@ -439,6 +441,21 @@ export class ImapClient {
     return res.lines
       .map((line) => parseFetchRecord(line))
       .filter((record): record is FetchRecord => record !== null);
+  }
+
+  /** Structure-only — no content is transferred, just sizes/types/filenames. */
+  async uidFetchBodyStructure(uid: number): Promise<ImapLine | null> {
+    const res = await this.execOk(`UID FETCH ${uid} (BODYSTRUCTURE)`, { label: 'Fetch' });
+    return res.lines.find((line) => /^\* \d+ FETCH /i.test(line.text)) ?? null;
+  }
+
+  /** `.PEEK` so a body preview never marks the message \Seen as a side effect. */
+  async uidFetchBodyPart(uid: number, partNumber: string): Promise<string | null> {
+    const res = await this.execOk(`UID FETCH ${uid} (BODY.PEEK[${partNumber}])`, {
+      label: 'Fetch',
+    });
+    const line = res.lines.find((l) => /^\* \d+ FETCH /i.test(l.text));
+    return line ? extractBodySectionValue(line) : null;
   }
 
   /** The only write this plugin ever performs against a mailbox. */

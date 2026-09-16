@@ -36,9 +36,21 @@ trust any third-party plugin.
 
 ## Scope
 
-- **Reads:** message headers only (`Message-ID`, `Subject`, `From`, `To`,
-  `Date`) via `BODY.PEEK`, from one folder of one account per provider
-  instance.
+- **Reads:** message headers (`Message-ID`, `Subject`, `From`, `To`, `Date`)
+  during polling/search, from one folder of one account per provider
+  instance. Body text and an attachment listing are read **lazily** — only
+  when a task's linked-issue panel is actually opened, never during the
+  automatic poll — via `BODY.PEEK`, so nothing here ever marks a message
+  `\Seen` as a side effect of reading it.
+- **Body text:** plain text only. HTML is stripped to text with a regex-based
+  stripper — never rendered, never parsed as a document — so a remote image
+  or tracking pixel in an HTML mail can never load. Capped at 200 KB fetched
+  / ~8,000 chars displayed; a longer or larger body is truncated or skipped
+  rather than fetched in full.
+- **Attachments:** listed by **filename and size only**, read straight off
+  `BODYSTRUCTURE` — file content is never fetched. `Task.attachments` has no
+  documented shape in the published plugin API, so this plugin doesn't
+  attempt to attach files to the task itself.
 - **Writes:** `\Seen` on a message that became a task via the automatic
   import — no deletes, no moves, no other flags. Polling opens the mailbox
   with `EXAMINE` (read-only), so it cannot change anything even by accident;
@@ -46,11 +58,11 @@ trust any third-party plugin.
   view's manual **"Import new mail now"** button creates a plain task per
   new message directly (see "Manual controls" below) — that's a task-list
   write, not a mailbox write.
-- **Does not do:** bodies, attachments, IDLE/push, OAuth, multiple folders,
-  mailbox listing, sending, or any filtering beyond the choice of folder. A
-  mail-client rule that files actionable mail into a dedicated folder, which
-  this plugin then watches, beats any in-app filtering language — so that's
-  the intended workflow rather than a missing feature.
+- **Does not do:** attachment file content, IDLE/push, OAuth, multiple
+  folders, mailbox listing, sending, or any filtering beyond the choice of
+  folder. A mail-client rule that files actionable mail into a dedicated
+  folder, which this plugin then watches, beats any in-app filtering
+  language — so that's the intended workflow rather than a missing feature.
 
 ## Manual controls
 
@@ -93,17 +105,34 @@ plugin.js (app renderer)                      spawned Node process
 ┌────────────────────────────┐                ┌──────────────────────┐
 │ registerIssueProvider      │  executeNode   │ worker (CJS bundle,  │
 │  getNewIssuesForBacklog ───┼───Script──────►│ embedded as a string)│──TLS──► IMAP
-│  getById (cached)          │                │  poll/search/lookup  │
-│ taskCreated hook ──────────┼───markSeen────►│  markSeen            │
+│  getById (cached, +body) ──┼───Script──────►│  poll/search/lookup  │
+│ taskCreated hook ──────────┼───markSeen────►│  markSeen/body       │
 └────────────────────────────┘                └──────────────────────┘
 ```
 
 - **`src/worker/`** — the IMAP client. Pure protocol code; no plugin API.
   `index.ts` is the entry point (`run(request)`); the build bundles it twice
-  (see below).
+  (see below). `body-structure.ts` parses `BODYSTRUCTURE`; `body-text.ts`
+  decodes/strips a fetched text part.
 - **`src/host/`** — watermark maths and the message cache. Pure, unit-tested.
 - **`src/plugin.ts`** — everything that touches `PluginAPI`.
 - **`src/ui/index.html`** — the credentials view, reached from the app menu.
+
+### Why body/attachments are fetched lazily, not during polling
+
+`getNewIssuesForBacklog` — the 5-minute automatic poll — only ever fetches
+headers. Body text and the attachment listing are a separate `op: 'body'`
+worker call, made only from `getById`, which the host calls when a task's
+linked-issue panel is actually opened. Most imported mail is never opened, so
+paying the extra round trip only then keeps the routine poll's cost
+proportional to how many messages arrived, not to how large each one is.
+
+It's also why an oversized text part is skipped rather than fetched:
+`BODYSTRUCTURE` reports each part's size up front, so the worker checks it
+against a 200 KB cap *before* issuing the `BODY.PEEK` fetch. The IMAP
+client's own 1 MB literal guard would still catch a part that lied about its
+size, but that guard drops the whole connection — a last resort, not the
+normal path for "this mail has a big attachment."
 
 ### Why the worker is a string
 

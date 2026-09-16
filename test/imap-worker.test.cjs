@@ -412,6 +412,148 @@ test('test reports mailbox status and capabilities', async () => {
   });
 });
 
+test('body: fetches a plain-text message and decodes quoted-printable', async () => {
+  await withServer(
+    {
+      messages: [
+        {
+          ...message(1, 'a@x', 'hello'),
+          bodyStructure:
+            '("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "QUOTED-PRINTABLE" 20 2)',
+          bodyParts: { 1: 'caf=C3=A9 au lait' },
+        },
+      ],
+    },
+    async (server) => {
+      const result = await run({ op: 'body', conn: conn(server), uid: 1 });
+      assert.equal(result.bodyText, 'café au lait');
+      assert.equal(result.bodyTruncated, false);
+      assert.deepEqual(result.attachments, []);
+    },
+  );
+});
+
+test('body: prefers text/plain over text/html in a multipart/alternative message', async () => {
+  await withServer(
+    {
+      messages: [
+        {
+          ...message(1, 'a@x', 'hi'),
+          bodyStructure:
+            '(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 5 1)' +
+            '("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 20 1) "ALTERNATIVE")',
+          bodyParts: { 1: 'plain body', 2: '<p>html <b>body</b></p>' },
+        },
+      ],
+    },
+    async (server) => {
+      const result = await run({ op: 'body', conn: conn(server), uid: 1 });
+      assert.equal(result.bodyText, 'plain body');
+      assert.ok(
+        !server.state.commands.some((c) => /BODY(\.PEEK)?\[2\]/i.test(c)),
+        'must not fetch the html alternative once the plain part is chosen',
+      );
+    },
+  );
+});
+
+test('body: lists an attachment from BODYSTRUCTURE without fetching its content', async () => {
+  await withServer(
+    {
+      messages: [
+        {
+          ...message(1, 'a@x', 'invoice'),
+          bodyStructure:
+            '(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 11 1)' +
+            '("APPLICATION" "PDF" ("NAME" "invoice.pdf") NIL NIL "BASE64" 45000 NIL ' +
+            '("ATTACHMENT" ("FILENAME" "invoice.pdf")) NIL) "MIXED")',
+          bodyParts: { 1: 'please pay' },
+        },
+      ],
+    },
+    async (server) => {
+      const result = await run({ op: 'body', conn: conn(server), uid: 1 });
+      assert.equal(result.bodyText, 'please pay');
+      assert.deepEqual(result.attachments, [{ filename: 'invoice.pdf', size: 45000 }]);
+      assert.ok(
+        !server.state.commands.some((c) => /BODY(\.PEEK)?\[2\]/i.test(c)),
+        'attachment content must never be fetched — only listed from BODYSTRUCTURE',
+      );
+    },
+  );
+});
+
+test('body: strips HTML to plain text when there is no text/plain part', async () => {
+  await withServer(
+    {
+      messages: [
+        {
+          ...message(1, 'a@x', 'newsletter'),
+          bodyStructure: '("TEXT" "HTML" ("CHARSET" "UTF-8") NIL NIL "7BIT" 30 2)',
+          bodyParts: { 1: '<p>Hello <b>there</b></p>' },
+        },
+      ],
+    },
+    async (server) => {
+      const result = await run({ op: 'body', conn: conn(server), uid: 1 });
+      assert.equal(result.bodyText, 'Hello there');
+    },
+  );
+});
+
+test('body: lists a non-text part with a NAME as an attachment when there is no text part', async () => {
+  await withServer(
+    {
+      messages: [
+        {
+          ...message(1, 'a@x', 'photo'),
+          bodyStructure:
+            '("IMAGE" "PNG" ("NAME" "photo.png") NIL NIL "BASE64" 20000 NIL NIL NIL)',
+          bodyParts: {},
+        },
+      ],
+    },
+    async (server) => {
+      const result = await run({ op: 'body', conn: conn(server), uid: 1 });
+      assert.equal(result.bodyText, undefined);
+      assert.equal(result.bodyTruncated, false);
+      assert.deepEqual(result.attachments, [{ filename: 'photo.png', size: 20000 }]);
+    },
+  );
+});
+
+test('body: skips an oversized text part instead of fetching it', async () => {
+  await withServer(
+    {
+      messages: [
+        {
+          ...message(1, 'a@x', 'huge'),
+          bodyStructure: '("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 5000000 1)',
+          bodyParts: { 1: 'should never be fetched' },
+        },
+      ],
+    },
+    async (server) => {
+      const result = await run({ op: 'body', conn: conn(server), uid: 1 });
+      assert.equal(result.bodyText, undefined);
+      assert.equal(result.bodyTruncated, true);
+      assert.ok(
+        !server.state.commands.some((c) => /BODY(\.PEEK)?\[1\]/i.test(c)),
+        'must not fetch a part known to be oversized from BODYSTRUCTURE',
+      );
+    },
+  );
+});
+
+test('body: returns an empty result when the server has nothing for that UID', async () => {
+  await withServer({ messages: [] }, async (server) => {
+    const result = await run({ op: 'body', conn: conn(server), uid: 999 });
+    assert.equal(result.bodyText, undefined);
+    assert.equal(result.bodyTruncated, false);
+    assert.deepEqual(result.attachments, []);
+  });
+});
+
 test('falls back to LOGIN when the server does not offer AUTH=PLAIN', async () => {
   await withServer(
     { messages: [message(1, 'a@x', 'one')], capabilities: ['IMAP4rev1'] },

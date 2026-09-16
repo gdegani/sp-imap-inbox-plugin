@@ -142,6 +142,32 @@ const startFakeImapServer = (options = {}) => {
       send(`${tag} OK FETCH completed`);
     };
 
+    /** `message.bodyStructure` is the raw parenthesized list, test-authored verbatim. */
+    const fetchBodyStructure = (tag, set) => {
+      for (const uid of expandUidSet(set, uids())) {
+        const message = state.messages.find((m) => m.uid === uid);
+        const structure =
+          message.bodyStructure ?? '("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 0 0)';
+        send(
+          `* ${state.messages.indexOf(message) + 1} FETCH (UID ${uid} BODYSTRUCTURE ${structure})`,
+        );
+      }
+      send(`${tag} OK FETCH completed`);
+    };
+
+    /** `message.bodyParts['<partNumber>']` is the raw (already wire-encoded) part content. */
+    const fetchBodyPart = (tag, set, partNumber) => {
+      for (const uid of expandUidSet(set, uids())) {
+        const message = state.messages.find((m) => m.uid === uid);
+        const raw = message.bodyParts?.[partNumber] ?? '';
+        const body = state.quotedHeaders
+          ? `"${raw.replace(/[\\"]/g, '\\$&')}"`
+          : formatLiteral(raw);
+        send(`* ${state.messages.indexOf(message) + 1} FETCH (UID ${uid} BODY[${partNumber}] ${body})`);
+      }
+      send(`${tag} OK FETCH completed`);
+    };
+
     const handle = (raw) => {
       if (pendingAuthTag) {
         const tag = pendingAuthTag;
@@ -215,11 +241,21 @@ const startFakeImapServer = (options = {}) => {
           }
           if (sub === 'FETCH') {
             const set = subArgs.split(' ')[0];
+            const itemsText = subArgs.slice(set.length).trim();
             if (/\(UID\)$/i.test(subArgs)) {
               for (const uid of expandUidSet(set, uids())) {
                 send(`* ${uid} FETCH (UID ${uid})`);
               }
               send(`${tag} OK FETCH completed`);
+              return;
+            }
+            if (/\bBODYSTRUCTURE\b/i.test(itemsText)) {
+              fetchBodyStructure(tag, set);
+              return;
+            }
+            const bodyPartMatch = /BODY(?:\.PEEK)?\[([^\]]*)\]/i.exec(itemsText);
+            if (bodyPartMatch && !/^HEADER/i.test(bodyPartMatch[1].trim())) {
+              fetchBodyPart(tag, set, bodyPartMatch[1]);
               return;
             }
             fetchUids(tag, set);
