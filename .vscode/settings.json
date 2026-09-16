@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^ls -la && printf '\\\\n---\\\\n' && ls -la package-lock\\.json 2>/dev/null \\|\\| echo 'NO package-lock\\.json'$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
