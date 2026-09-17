@@ -17,6 +17,7 @@ import {
 } from './host/watermark';
 import { accountLabel, secretKeyFor, watermarkKeyFor } from './shared/keys';
 import type {
+  AttachmentsResult,
   ImapConnectionCfg,
   ImapMessage,
   ImapSecurity,
@@ -32,6 +33,21 @@ interface NodeScriptResult {
   success: boolean;
   result?: unknown;
   error?: string | { message?: string };
+}
+
+/**
+ * Shape of one `Task.attachments` entry. Not in the published plugin-api
+ * types (see AGENTS.md "Coupling with the host app") — confirmed against the
+ * app's own `TaskAttachmentCopy`/`DropPasteInput` models. Only `type: 'FILE'`
+ * is used here; `path` must be a plain absolute filesystem path, never a
+ * `file://` URL — the host's own open-path guard (GHSA-hr87-735w-hfq3)
+ * rejects those.
+ */
+interface PluginTaskAttachment {
+  id: string;
+  type: 'FILE';
+  path: string;
+  title: string;
 }
 
 declare const PluginAPI: {
@@ -56,6 +72,10 @@ declare const PluginAPI: {
   showSnack(cfg: { msg: string; type?: 'SUCCESS' | 'ERROR' | 'WARNING' | 'INFO' }): void;
   getAllProjects(): Promise<{ id: string; title: string }[]>;
   addTask(taskData: { title: string; projectId?: string; notes?: string }): Promise<string>;
+  updateTask(
+    taskId: string,
+    updates: { attachments?: PluginTaskAttachment[] },
+  ): Promise<void>;
   log: {
     log: (...args: unknown[]) => void;
     info: (...args: unknown[]) => void;
@@ -80,6 +100,10 @@ const REFILL_MAX_MESSAGES = 100;
 const MARK_SEEN_DEBOUNCE_MS = 1500;
 const MAX_REMEMBERED_ACCOUNTS = 10;
 const ACCOUNTS_KEY = 'accounts';
+/** Must match `MAX_ATTACHMENT_FETCH_BYTES` in `worker/attachments.ts` — display copy only. */
+const MAX_ATTACHMENT_MB = 8;
+/** `~` is expanded by the worker (it has `os`; this file, running in the iframe, does not). */
+const DEFAULT_ATTACHMENTS_FOLDER = '~/Documents/SuperProductivity IMAP Attachments';
 
 const DESKTOP_ONLY_MSG =
   'IMAP Inbox runs only in the desktop app — it needs a direct connection to the mail server.';
@@ -89,7 +113,10 @@ const DESKTOP_ONLY_MSG =
 const cache = new MessageCache(CACHE_TTL_MS, CACHE_MAX_ENTRIES);
 /** Password-free connection templates, keyed by {@link sourceKey}. */
 const sources = new Map<string, Omit<ImapConnectionCfg, 'password'>>();
-const pendingSeenIds = new Set<string>();
+/** Where to save fetched attachment content, keyed by {@link sourceKey}. */
+const attachmentFolders = new Map<string, string>();
+/** issueId -> taskId, for the debounced post-import flush (markSeen + attachments). */
+const pendingImports = new Map<string, string>();
 let markSeenTimer: ReturnType<typeof setTimeout> | null = null;
 let refillInFlight: Promise<void> | null = null;
 /** One nag per app session, not one per poll. */
@@ -104,6 +131,7 @@ interface ImapProviderConfig {
   username?: string;
   folder?: string;
   allowSelfSigned?: boolean;
+  attachmentsFolder?: string;
 }
 
 class MissingPasswordError extends Error {
@@ -152,6 +180,9 @@ const readConfig = (
 const sourceKey = (conn: Omit<ImapConnectionCfg, 'password'>): string =>
   `${conn.host}:${conn.port}:${conn.username}:${conn.folder}`;
 
+const readAttachmentsFolder = (config: Record<string, unknown>): string =>
+  (config as ImapProviderConfig).attachmentsFolder?.trim() || DEFAULT_ATTACHMENTS_FOLDER;
+
 const withPassword = async (
   base: Omit<ImapConnectionCfg, 'password'>,
 ): Promise<ImapConnectionCfg> => {
@@ -168,6 +199,7 @@ const connectionFor = async (
 ): Promise<ImapConnectionCfg> => {
   const base = readConfig(config);
   sources.set(sourceKey(base), base);
+  attachmentFolders.set(sourceKey(base), readAttachmentsFolder(config));
   void rememberAccount(base);
   return withPassword(base);
 };
@@ -295,12 +327,67 @@ const refillCacheOnce = (config: Record<string, unknown>): Promise<void> => {
   return refillInFlight;
 };
 
-// --- mark as read ------------------------------------------------------------
+// --- post-import side effects (mark as read, save attachments) --------------
 
-const flushMarkSeen = async (): Promise<void> => {
-  const ids = [...pendingSeenIds];
-  pendingSeenIds.clear();
-  if (ids.length === 0) {
+/** One attachment result, turned into what `updateTask` expects. */
+const toTaskAttachments = (
+  uid: number,
+  saved: { filename: string; path: string }[],
+): PluginTaskAttachment[] =>
+  saved.map((a, i) => ({
+    id: `${uid}-${i}`,
+    type: 'FILE',
+    path: a.path,
+    title: a.filename,
+  }));
+
+/**
+ * Fetches real attachment content for a batch of messages from the same
+ * account and attaches whatever was saved to the matching task. A fetch
+ * failure here is never surfaced: the task and its mark-as-read already
+ * succeeded (or were attempted) independently, and a missing attachment is
+ * not worth interrupting the import for.
+ */
+const saveGroupAttachments = async (
+  source: string,
+  base: Omit<ImapConnectionCfg, 'password'>,
+  uids: number[],
+  taskIdByUid: Map<number, string>,
+): Promise<void> => {
+  const saveDir = attachmentFolders.get(source) || DEFAULT_ATTACHMENTS_FOLDER;
+  try {
+    const conn = await withPassword(base);
+    const res = await callWorker<AttachmentsResult>({
+      op: 'attachments',
+      conn,
+      uids,
+      saveDir,
+    });
+    for (const [uidStr, result] of Object.entries(res.byUid)) {
+      if (result.saved.length === 0) {
+        continue;
+      }
+      const taskId = taskIdByUid.get(Number(uidStr));
+      if (!taskId) {
+        continue;
+      }
+      try {
+        await PluginAPI.updateTask(taskId, {
+          attachments: toTaskAttachments(Number(uidStr), result.saved),
+        });
+      } catch (err) {
+        PluginAPI.log.warn('[imap-inbox] could not attach saved files to the task', err);
+      }
+    }
+  } catch (err) {
+    PluginAPI.log.warn('[imap-inbox] could not fetch attachment content', err);
+  }
+};
+
+const flushPendingImports = async (): Promise<void> => {
+  const entries = [...pendingImports.entries()];
+  pendingImports.clear();
+  if (entries.length === 0) {
     return;
   }
 
@@ -308,10 +395,10 @@ const flushMarkSeen = async (): Promise<void> => {
   // mailbox instance it was read from.
   const groups = new Map<
     string,
-    { source: string; uidValidity: number; uids: number[] }
+    { source: string; uidValidity: number; uids: number[]; taskIdByUid: Map<number, string> }
   >();
-  for (const id of ids) {
-    const found = cache.locate(id);
+  for (const [issueId, taskId] of entries) {
+    const found = cache.locate(issueId);
     if (!found) {
       // The message left the cache before its task was created. It simply stays
       // unread; we never guess a UID.
@@ -322,8 +409,10 @@ const flushMarkSeen = async (): Promise<void> => {
       source: found.source,
       uidValidity: found.uidValidity,
       uids: [],
+      taskIdByUid: new Map<number, string>(),
     };
     group.uids.push(found.uid);
+    group.taskIdByUid.set(found.uid, taskId);
     groups.set(groupKey, group);
   }
 
@@ -350,17 +439,19 @@ const flushMarkSeen = async (): Promise<void> => {
       // for. A message that stays unread is a cosmetic problem in their client.
       PluginAPI.log.err('[imap-inbox] could not flag imported mail as read', err);
     }
+
+    await saveGroupAttachments(group.source, base, group.uids, group.taskIdByUid);
   }
 };
 
-const queueMarkSeen = (issueId: string): void => {
-  pendingSeenIds.add(issueId);
+const queueImportSideEffects = (issueId: string, taskId: string): void => {
+  pendingImports.set(issueId, taskId);
   if (markSeenTimer) {
     return;
   }
   markSeenTimer = setTimeout(() => {
     markSeenTimer = null;
-    void flushMarkSeen();
+    void flushPendingImports();
   }, MARK_SEEN_DEBOUNCE_MS);
 };
 
@@ -421,6 +512,17 @@ const configFields: PluginFormField[] = [
     label: 'Accept a self-signed certificate',
     description:
       'Only for a server whose certificate you control, such as Proton Bridge or a self-hosted Dovecot.',
+    advanced: true,
+  },
+  {
+    key: 'attachmentsFolder',
+    type: 'input',
+    label: 'Save attachments to',
+    description:
+      `Where real attachment files are saved when a task is created (the task ` +
+      `gets its own linked copy). Defaults to "${DEFAULT_ATTACHMENTS_FOLDER}" if ` +
+      `left blank. A file over ${MAX_ATTACHMENT_MB} MB is skipped and stays ` +
+      `listed by name/size only, same as before.`,
     advanced: true,
   },
 ];
@@ -607,6 +709,7 @@ PluginAPI.registerIssueProvider({
 
 interface TaskCreatedPayload {
   task?: {
+    id?: string;
     issueId?: string | null;
     issueType?: string | null;
     issueProviderId?: string | null;
@@ -617,12 +720,13 @@ const PROVIDER_KEY = 'plugin:imap-inbox';
 
 PluginAPI.registerHook('taskCreated', (payload: unknown) => {
   const task = (payload as TaskCreatedPayload)?.task;
-  if (!task?.issueId || task.issueType !== PROVIDER_KEY) {
+  if (!task?.id || !task?.issueId || task.issueType !== PROVIDER_KEY) {
     return;
   }
   // The hook runs off LOCAL_ACTIONS, so only the device that actually imported
-  // the message flags it — a task arriving through sync never re-flags.
-  queueMarkSeen(task.issueId);
+  // the message flags it/fetches its attachments — a task arriving through
+  // sync never re-triggers either.
+  queueImportSideEffects(task.issueId, task.id);
 });
 
 // --- credentials UI bridge ---------------------------------------------------
@@ -845,7 +949,8 @@ PluginAPI.onUnload?.(() => {
     clearTimeout(markSeenTimer);
     markSeenTimer = null;
   }
-  pendingSeenIds.clear();
+  pendingImports.clear();
   sources.clear();
+  attachmentFolders.clear();
   cache.clear();
 });

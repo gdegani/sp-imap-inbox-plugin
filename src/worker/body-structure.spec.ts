@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { literalToken } from './imap-parse';
-import { parseBodyStructure, selectAttachments, selectTextPart } from './body-structure';
+import {
+  parseBodyStructure,
+  selectAttachmentParts,
+  selectAttachments,
+  selectTextPart,
+} from './body-structure';
 
 const fetchLine = (bodystructure: string): string =>
   `* 1 FETCH (UID 5 BODYSTRUCTURE ${bodystructure})`;
@@ -142,5 +147,32 @@ describe('selectAttachments', () => {
     ).join('');
     const parts = parseBodyStructure(fetchLine(`(${many} "MIXED")`), []);
     expect(selectAttachments(parts, null, 3)).toHaveLength(3);
+  });
+});
+
+describe('selectAttachmentParts', () => {
+  it('returns the full BodyPart (partNumber/encoding included), unlike selectAttachments', () => {
+    const parts = parseBodyStructure(
+      fetchLine(
+        '(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 100 5)' +
+          '("APPLICATION" "PDF" ("NAME" "invoice.pdf") NIL NIL "BASE64" 45000 NIL ' +
+          '("ATTACHMENT" ("FILENAME" "invoice.pdf")) NIL) "MIXED")',
+      ),
+      [],
+    );
+    const textPart = selectTextPart(parts);
+    const attachmentParts = selectAttachmentParts(parts, textPart?.partNumber ?? null, 20);
+    expect(attachmentParts).toEqual([
+      {
+        partNumber: '2',
+        type: 'APPLICATION',
+        subtype: 'PDF',
+        charset: undefined,
+        encoding: 'BASE64',
+        size: 45000,
+        filename: 'invoice.pdf',
+        dispositionType: 'ATTACHMENT',
+      },
+    ]);
   });
 });

@@ -57,7 +57,14 @@ export type WorkerRequest =
       uidValidity: number;
       uids: number[];
     }
-  | { op: 'body'; conn: ImapConnectionCfg; uid: number };
+  | { op: 'body'; conn: ImapConnectionCfg; uid: number }
+  | {
+      op: 'attachments';
+      conn: ImapConnectionCfg;
+      uids: number[];
+      /** Absolute local directory to save attachment content into; `~` is expanded. */
+      saveDir: string;
+    };
 
 export interface TestResult {
   status: MailboxStatus;
@@ -104,4 +111,36 @@ export interface MessageBodyResult {
   /** True when the text part existed but was skipped (too large) or cut short. */
   bodyTruncated: boolean;
   attachments: { filename: string; size: number }[];
+}
+
+export interface SavedAttachment {
+  /** Filename as declared on the message (decoded, not filesystem-safe). */
+  filename: string;
+  size: number;
+  /** Absolute path on disk — filesystem-safe name, may differ from `filename`. */
+  path: string;
+}
+
+export type SkippedAttachmentReason =
+  | 'too-large'
+  | 'unsupported-encoding'
+  | 'budget-exceeded'
+  | 'time-budget'
+  | 'write-failed';
+
+export interface SkippedAttachment {
+  filename: string;
+  size: number;
+  reason: SkippedAttachmentReason;
+}
+
+export interface AttachmentFetchResult {
+  saved: SavedAttachment[];
+  skipped: SkippedAttachment[];
+}
+
+/** Keyed by UID, stringified — JSON object keys are always strings. */
+export interface AttachmentsResult {
+  status: MailboxStatus;
+  byUid: Record<string, AttachmentFetchResult>;
 }

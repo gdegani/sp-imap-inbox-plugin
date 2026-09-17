@@ -7,7 +7,13 @@
 
 import { decodeBytes } from './mime';
 
-const MAX_BODY_TEXT_CHARS = 8000;
+/**
+ * Backstop only — the real limit is `MAX_BODY_FETCH_BYTES` in `worker/index.ts`,
+ * checked before the fetch even happens. This just bounds the rare case where
+ * decoding/entity-expansion measurably grows a part that was already under
+ * that byte cap.
+ */
+const MAX_BODY_TEXT_CHARS = 200_000;
 
 const decodeQuotedPrintable = (raw: string): Uint8Array => {
   const bytes: number[] = [];
@@ -26,7 +32,8 @@ const decodeQuotedPrintable = (raw: string): Uint8Array => {
   return Uint8Array.from(bytes);
 };
 
-const decodeBase64 = (raw: string): Uint8Array =>
+/** Exported for `attachments.ts`: the same wire-format decode, but binary. */
+export const decodeBase64 = (raw: string): Uint8Array =>
   Uint8Array.from(Buffer.from(raw.replace(/\s+/g, ''), 'base64'));
 
 /** Content-Transfer-Encoding decode. 7BIT/8BIT/BINARY are already text bytes. */

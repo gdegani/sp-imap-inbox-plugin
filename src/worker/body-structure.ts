@@ -283,13 +283,30 @@ export const selectTextPart = (parts: BodyPart[]): BodyPart | null =>
  * filename (the older convention some clients still use instead of a
  * disposition header). Never includes the chosen text part itself.
  */
+const filterAttachmentParts = (
+  parts: BodyPart[],
+  excludePartNumber: string | null,
+  limit: number,
+): BodyPart[] =>
+  parts
+    .filter((p) => p.partNumber !== excludePartNumber)
+    .filter((p) => !!p.filename && (p.dispositionType === 'ATTACHMENT' || p.type !== 'TEXT'))
+    .slice(0, limit);
+
+/** Name/size only — for the display listing, which never fetches content. */
 export const selectAttachments = (
   parts: BodyPart[],
   excludePartNumber: string | null,
   limit: number,
 ): { filename: string; size: number }[] =>
-  parts
-    .filter((p) => p.partNumber !== excludePartNumber)
-    .filter((p) => !!p.filename && (p.dispositionType === 'ATTACHMENT' || p.type !== 'TEXT'))
-    .slice(0, limit)
-    .map((p) => ({ filename: p.filename as string, size: p.size }));
+  filterAttachmentParts(parts, excludePartNumber, limit).map((p) => ({
+    filename: p.filename as string,
+    size: p.size,
+  }));
+
+/** Full parts (partNumber/encoding included) — for fetching real content. */
+export const selectAttachmentParts = (
+  parts: BodyPart[],
+  excludePartNumber: string | null,
+  limit: number,
+): BodyPart[] => filterAttachmentParts(parts, excludePartNumber, limit);

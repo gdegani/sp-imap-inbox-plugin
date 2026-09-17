@@ -44,25 +44,74 @@ trust any third-party plugin.
   `\Seen` as a side effect of reading it.
 - **Body text:** plain text only. HTML is stripped to text with a regex-based
   stripper — never rendered, never parsed as a document — so a remote image
-  or tracking pixel in an HTML mail can never load. Capped at 200 KB fetched
-  / ~8,000 chars displayed; a longer or larger body is truncated or skipped
-  rather than fetched in full.
-- **Attachments:** listed by **filename and size only**, read straight off
-  `BODYSTRUCTURE` — file content is never fetched. `Task.attachments` has no
-  documented shape in the published plugin API, so this plugin doesn't
-  attempt to attach files to the task itself.
+  or tracking pixel in an HTML mail can never load. Capped at 2 MB fetched;
+  a longer or larger body is truncated or skipped rather than fetched in
+  full, but in practice this covers essentially every real email.
+- **Attachments:** listed by filename and size straight off `BODYSTRUCTURE`
+  during the lazy body fetch (as before), and *also* fetched and saved to
+  disk as a linked file on the task, as a side effect of import (see "How
+  attachments get saved" below). Only `BASE64`-encoded parts up to 8 MB are
+  saved — a larger or differently-encoded attachment stays listed by name/size
+  only, same as before this existed.
 - **Writes:** `\Seen` on a message that became a task via the automatic
   import — no deletes, no moves, no other flags. Polling opens the mailbox
   with `EXAMINE` (read-only), so it cannot change anything even by accident;
-  only the mark-as-read path uses `SELECT`. Separately, the credentials
-  view's manual **"Import new mail now"** button creates a plain task per
-  new message directly (see "Manual controls" below) — that's a task-list
-  write, not a mailbox write.
-- **Does not do:** attachment file content, IDLE/push, OAuth, multiple
+  only the mark-as-read path uses `SELECT`. Attachment content is fetched
+  read-only (`BODY.PEEK`) the same way. Separately, the credentials view's
+  manual **"Import new mail now"** button creates a plain task per new
+  message directly (see "Manual controls" below) — that's a task-list write,
+  not a mailbox write, and (like mark-as-read) does not save attachments
+  either, for the same reason: it has no issue-provider linkage to hang the
+  save off of.
+- **Does not do:** a faithful/rendered copy of the original email (see "Why
+  not a PDF of the original email" below), IDLE/push, OAuth, multiple
   folders, mailbox listing, sending, or any filtering beyond the choice of
   folder. A mail-client rule that files actionable mail into a dedicated
   folder, which this plugin then watches, beats any in-app filtering
   language — so that's the intended workflow rather than a missing feature.
+
+### How attachments get saved
+
+A message's real attachment files are fetched and written to disk as a side
+effect of `taskCreated` — the same local-only hook that flags the message
+`\Seen` (see "Marking imported mail as read") — not during the lazy body
+fetch, because only `taskCreated` carries the local task id `updateTask`
+needs. The two run back-to-back off the same debounced batch, in one worker
+call per account: `BODYSTRUCTURE` first, then one `BODY.PEEK[n]` per
+qualifying part, decoded and written under **Save attachments to** (an
+advanced field next to the connection settings; defaults to
+`~/Documents/SuperProductivity IMAP Attachments` if left blank). Saved files
+are named `<uid>_<sanitized filename>` — the original filename is
+attacker-controlled (it comes straight off the message), so path separators,
+control characters and leading dots are stripped before it ever touches the
+filesystem. The task then gets a `FILE`-type attachment pointing at that path,
+which Super Productivity opens with the OS default handler on click; the
+host's own `openPath` guard (not this plugin) is what keeps a
+disguised-as-a-document executable from running on open.
+
+A fetch/save failure here is never surfaced — the task and its mark-as-read
+already happened independently, and a missing attachment isn't worth
+interrupting the import for. Since this rides on `taskCreated`, it inherits
+that hook's own limitation: mail imported through **"Import new mail now"**
+doesn't get attachments saved either, for the same reason it isn't flagged
+`\Seen` (see "Manual controls").
+
+This needed a new permission, `updateTask` (declared in `manifest.json`), on
+top of what the plugin already had — upgrading from an older install may
+show a one-time permission prompt for it, the same as the `getAllProjects`/
+`addTask` prompt described under "Manual controls".
+
+### Why not a PDF of the original email
+
+An earlier idea was to also attach a PDF snapshot of the whole message. It
+turned out not to be feasible for this plugin specifically: the embedded
+worker script is a single string capped at 100,000 characters
+(`scripts/build.js`'s budget, see "Why the worker is a string"), the spawned
+Node process has no `PATH` and no access to any `node_modules` the plugin.zip
+might bundle, and even a plain-text-only PDF writer would still reverse the
+"HTML is never rendered" security stance above. Real attachment content (this
+section) was the part of that idea that *was* feasible, so that's what
+shipped.
 
 ## Manual controls
 
@@ -118,21 +167,27 @@ plugin.js (app renderer)                      spawned Node process
 - **`src/plugin.ts`** — everything that touches `PluginAPI`.
 - **`src/ui/index.html`** — the credentials view, reached from the app menu.
 
-### Why body/attachments are fetched lazily, not during polling
+### Why body text is fetched lazily, but real attachment content isn't
 
 `getNewIssuesForBacklog` — the 5-minute automatic poll — only ever fetches
-headers. Body text and the attachment listing are a separate `op: 'body'`
+headers. Body text and the attachment *listing* are a separate `op: 'body'`
 worker call, made only from `getById`, which the host calls when a task's
 linked-issue panel is actually opened. Most imported mail is never opened, so
 paying the extra round trip only then keeps the routine poll's cost
 proportional to how many messages arrived, not to how large each one is.
 
-It's also why an oversized text part is skipped rather than fetched:
+Real attachment *content*, by contrast, is fetched eagerly, right after
+import (see "How attachments get saved" above) — it has to be, since that is
+the one point this plugin has both a message and the local task id needed to
+attach a saved file to it; `getById` only ever sees the message.
+
+Both paths skip an oversized part rather than fetching it:
 `BODYSTRUCTURE` reports each part's size up front, so the worker checks it
-against a 200 KB cap *before* issuing the `BODY.PEEK` fetch. The IMAP
-client's own 1 MB literal guard would still catch a part that lied about its
-size, but that guard drops the whole connection — a last resort, not the
-normal path for "this mail has a big attachment."
+against a cap (2 MB for body text, 8 MB for an attachment) *before* issuing
+the `BODY.PEEK` fetch. The IMAP client's own 10 MB literal guard would still
+catch a part that lied about its size, but that guard drops the whole
+connection — a last resort, not the normal path for "this mail has a big
+attachment."
 
 ### Why the worker is a string
 
@@ -171,27 +226,33 @@ gitignored.
 
 ## Protocol subset (worker)
 
-One command per invocation: `{ op: 'poll' | 'fetch' | 'search' | 'test', ... }`.
+One command per invocation: `{ op: 'poll' | 'window' | 'search' | 'lookup' |
+'test' | 'markSeen' | 'body' | 'attachments', ... }`.
 
 - Connect: `tls.connect` (implicit TLS, 993) or `net.connect` + `STARTTLS`
   (143). `rejectUnauthorized: true` by default; an "allow self-signed
   certificate" option exists for Proton Bridge / self-hosted Dovecot.
 - `CAPABILITY`, then `LOGIN` or `AUTHENTICATE PLAIN`. No SASL beyond PLAIN.
-- `EXAMINE` (not `SELECT`) for polling — a read-only mailbox open, so nothing
-  can set `\Seen` by accident. Records `UIDVALIDITY`/`UIDNEXT` from the
-  untagged responses.
+- `EXAMINE` (not `SELECT`) for every read path (polling, search, body,
+  attachments) — a read-only mailbox open, so nothing can set `\Seen` by
+  accident. Records `UIDVALIDITY`/`UIDNEXT` from the untagged responses.
 - `UID SEARCH UID <watermark+1>:*` for polling; `UID SEARCH TEXT "<term>"`
   for `searchIssues`; `UID SEARCH HEADER Message-ID "<id>"` for `getById`
   misses.
 - `UID FETCH <set> (UID INTERNALDATE BODY.PEEK[HEADER.FIELDS (MESSAGE-ID SUBJECT FROM TO DATE)])`
-  — `BODY.PEEK` is the second `\Seen` guard.
-- `UID STORE <set> +FLAGS.SILENT (\Seen)` — the only write, under `SELECT`
-  (read-write). Every other operation opens the mailbox with `EXAMINE`.
+  for headers; `UID FETCH <uid> (BODYSTRUCTURE)` then `UID FETCH <uid>
+  (BODY.PEEK[<part>])` per part for body text and attachment content —
+  `BODY.PEEK` is the second `\Seen` guard on every one of these.
+- `UID STORE <set> +FLAGS.SILENT (\Seen)` — the only write against the
+  mailbox, under `SELECT` (read-write). Every other operation opens the
+  mailbox with `EXAMINE`. Saving an attachment writes to the *local
+  filesystem* (see "How attachments get saved"), not the mailbox.
 - `LOGOUT`, then socket destroy on every path including errors.
 
 Hard caps per poll: 50 messages, 512 chars per decoded header field, 30s
-wall clock. Bodies are never fetched — subject, sender and date are the
-task; the mail client is where the body is read.
+wall clock. Body text is capped at 2 MB fetched; a `BASE64` attachment part
+up to 8 MB is fetched and saved, anything larger or differently-encoded
+stays listed by name/size only.
 
 ## What counts as "new"
 
@@ -222,10 +283,13 @@ against existing tasks and the archive before creating anything).
 - Trigger: the `taskCreated` hook, filtered to
   `issueType === 'plugin:imap-inbox'`. That hook runs off local actions
   only, so only the device that did the import flags the message; a task
-  arriving through sync does not re-flag it.
+  arriving through sync does not re-flag it. The same hook, same filter, and
+  same debounced batch is also what triggers saving real attachment content
+  (see "How attachments get saved") — they run back-to-back per account, not
+  as two independent triggers.
 - Flagging is debounced ~1.5s and grouped by account and UIDVALIDITY, so an
-  import of 30 messages is one connection. A UID whose mailbox was recreated
-  is skipped, never flagged.
+  import of 30 messages is one connection (and one `attachments` call, right
+  after). A UID whose mailbox was recreated is skipped, never flagged.
 - **`\Seen` is written, never read.** "New" stays defined by the UID
   watermark, so reading a message in your own mail client does not suppress
   its task.
@@ -262,6 +326,13 @@ against existing tasks and the archive before creating anything).
   real-world servers is still the maintenance cost of this approach.
 - Corporate CA bundles / HTTP(S) proxies aren't supported — the spawned
   process's environment is stripped to `{NODE_ENV, ELECTRON_RUN_AS_NODE}`.
+- **Saved attachments are exactly what the sender sent, unscanned.** The
+  *filename* is sanitized before it ever becomes a path (see "How attachments
+  get saved"), but the file's content is not inspected — a malicious
+  attachment saved this way is just as malicious as one saved by hand from
+  any other mail client. The host's own `openPath` guard still blocks it from
+  launching as an executable on click, but that is a host protection, not
+  something this plugin adds.
 
 ## Tests
 
@@ -305,6 +376,16 @@ the README there.
   it.
 - **The cache is also the UID index** for marking as read, which is why
   expired entries are reported as absent but not dropped.
+- **Never write an attachment to disk using its filename verbatim.** It comes
+  straight off the message (BODYSTRUCTURE's NAME/FILENAME param) and is
+  attacker-controlled — always go through `sanitizeAttachmentFilename`
+  (`worker/attachments.ts`), which strips separators/traversal/leading dots,
+  or a crafted attachment name becomes a path-traversal write.
+- **Never save a non-`BASE64` attachment part as bytes.** The IMAP client
+  decodes every literal as UTF-8 text (`imap-client.ts`), which is lossless
+  for BASE64's ASCII alphabet but would corrupt arbitrary binary from a
+  7BIT/8BIT/BINARY part — `saveAttachmentParts` skips those on purpose rather
+  than write corrupted content.
 
 ## Development
 

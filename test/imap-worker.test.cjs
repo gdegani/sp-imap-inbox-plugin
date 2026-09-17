@@ -2,6 +2,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { startFakeImapServer } = require('./fake-imap-server.cjs');
 
@@ -552,6 +554,73 @@ test('body: returns an empty result when the server has nothing for that UID', a
     assert.equal(result.bodyTruncated, false);
     assert.deepEqual(result.attachments, []);
   });
+});
+
+test('attachments: fetches and saves real content, skipping what is too large', async () => {
+  const saveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'imap-inbox-attachments-test-'));
+  try {
+    await withServer(
+      {
+        messages: [
+          {
+            ...message(7, 'a@x', 'invoice'),
+            bodyStructure:
+              '(("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 11 1)' +
+              '("APPLICATION" "PDF" ("NAME" "invoice.pdf") NIL NIL "BASE64" 8 NIL ' +
+              '("ATTACHMENT" ("FILENAME" "invoice.pdf")) NIL)' +
+              '("IMAGE" "PNG" ("NAME" "huge.png") NIL NIL "BASE64" 99999999 NIL ' +
+              '("ATTACHMENT" ("FILENAME" "huge.png")) NIL) "MIXED")',
+            bodyParts: { 1: 'please pay', 2: Buffer.from('%PDF-1.4').toString('base64') },
+          },
+        ],
+      },
+      async (server) => {
+        const result = await run({
+          op: 'attachments',
+          conn: conn(server),
+          uids: [7],
+          saveDir,
+        });
+        const forUid = result.byUid[7];
+        assert.equal(forUid.saved.length, 1);
+        assert.equal(forUid.saved[0].filename, 'invoice.pdf');
+        assert.equal(fs.readFileSync(forUid.saved[0].path, 'utf8'), '%PDF-1.4');
+        assert.deepEqual(forUid.skipped, [
+          { filename: 'huge.png', size: 99999999, reason: 'too-large' },
+        ]);
+        assert.ok(
+          !server.state.commands.some((c) => /BODY(\.PEEK)?\[3\]/i.test(c)),
+          'the oversized part must never be fetched',
+        );
+      },
+    );
+  } finally {
+    fs.rmSync(saveDir, { recursive: true, force: true });
+  }
+});
+
+test('attachments: a message with no attachment parts saves nothing', async () => {
+  const saveDir = fs.mkdtempSync(path.join(os.tmpdir(), 'imap-inbox-attachments-test-'));
+  try {
+    await withServer(
+      {
+        messages: [
+          {
+            ...message(1, 'a@x', 'hello'),
+            bodyStructure: '("TEXT" "PLAIN" ("CHARSET" "UTF-8") NIL NIL "7BIT" 5 1)',
+            bodyParts: { 1: 'hello' },
+          },
+        ],
+      },
+      async (server) => {
+        const result = await run({ op: 'attachments', conn: conn(server), uids: [1], saveDir });
+        assert.deepEqual(result.byUid[1], { saved: [], skipped: [] });
+        assert.deepEqual(fs.readdirSync(saveDir), []);
+      },
+    );
+  } finally {
+    fs.rmSync(saveDir, { recursive: true, force: true });
+  }
 });
 
 test('falls back to LOGIN when the server does not offer AUTH=PLAIN', async () => {

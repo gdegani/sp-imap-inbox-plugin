@@ -21,7 +21,8 @@
     "onMessage",
     "showSnack",
     "getAllProjects",
-    "addTask"
+    "addTask",
+    "updateTask"
   ],
   "nodeScriptConfig": {
     "timeout": 25000,

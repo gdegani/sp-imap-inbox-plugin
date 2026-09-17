@@ -19,12 +19,17 @@ import {
 const CRLF = Buffer.from('\r\n');
 
 /**
- * Abuse guards, not tuning knobs. We only ever request a bounded number of
- * header-only records, so crossing any of these means the peer is broken or
- * hostile and the right move is to drop the connection, not to keep buffering.
+ * Abuse guards, not tuning knobs. Header records are always small, and a body
+ * or attachment fetch is pre-checked against BODYSTRUCTURE's declared size
+ * before it is ever requested (see `worker/index.ts`, `worker/attachments.ts`)
+ * — so a literal that still crosses this line means the peer is lying about
+ * size or is otherwise broken/hostile, and the right move is to drop the
+ * connection, not to keep buffering. MAX_LITERAL_BYTES sets the ceiling a
+ * single fetched part (body text or one attachment) may reach; MAX_BUFFER_BYTES
+ * is the unread-socket-buffer cap and must stay comfortably above it.
  */
-const MAX_BUFFER_BYTES = 4 * 1024 * 1024;
-const MAX_LITERAL_BYTES = 1 * 1024 * 1024;
+const MAX_BUFFER_BYTES = 16 * 1024 * 1024;
+const MAX_LITERAL_BYTES = 10 * 1024 * 1024;
 const MAX_RESPONSE_LINES = 5000;
 
 export interface ExecResult {

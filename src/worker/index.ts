@@ -1,4 +1,5 @@
 import type {
+  AttachmentsResult,
   ImapMessage,
   MarkSeenResult,
   MessageBodyResult,
@@ -7,7 +8,13 @@ import type {
   TestResult,
   WorkerRequest,
 } from '../shared/types';
-import { parseBodyStructure, selectAttachments, selectTextPart } from './body-structure';
+import { MIN_REMAINING_MS_TO_START, saveAttachmentParts } from './attachments';
+import {
+  parseBodyStructure,
+  selectAttachmentParts,
+  selectAttachments,
+  selectTextPart,
+} from './body-structure';
 import { renderBodyText } from './body-text';
 import { ImapClient } from './imap-client';
 import { buildUidSet, FetchRecord, parseInternalDateMs } from './imap-parse';
@@ -27,12 +34,14 @@ const MAX_MARK_SEEN = 200;
 const MAX_LOOKUPS = 25;
 /**
  * Checked against BODYSTRUCTURE's reported size *before* fetching, so an
- * oversized text part is skipped instead of tripping the client's 1MB literal
+ * oversized text part is skipped instead of tripping the client's literal
  * guard — which destroys the whole connection, not just this one call.
  */
-const MAX_BODY_FETCH_BYTES = 200 * 1024;
-/** Attachments are listed from BODYSTRUCTURE only; content is never fetched. */
+const MAX_BODY_FETCH_BYTES = 2 * 1024 * 1024;
+/** Also the per-message cap on how many attachment parts get real content fetched. */
 const MAX_ATTACHMENTS_LISTED = 20;
+/** Per `attachments` call — this runs one BODYSTRUCTURE fetch per UID, unlike the batched ops above. */
+const MAX_ATTACHMENT_UIDS_PER_CALL = 20;
 
 const toMessage = (record: FetchRecord, uidValidity: number): ImapMessage => {
   const headers = parseHeaderBlock(record.header);
@@ -215,6 +224,47 @@ const body = async (
 };
 
 /**
+ * Real attachment content, saved to disk — unlike `body()`, which only ever
+ * lists filenames/sizes. One BODYSTRUCTURE fetch per requested UID, so the
+ * uid count is capped well below the batched header/markSeen ops above.
+ */
+const attachmentsOp = async (
+  client: ImapClient,
+  req: Extract<WorkerRequest, { op: 'attachments' }>,
+  deadlineAt: number,
+): Promise<AttachmentsResult> => {
+  const status = await client.openMailbox(req.conn.folder);
+  const byUid: AttachmentsResult['byUid'] = {};
+
+  for (const uid of req.uids.slice(0, MAX_ATTACHMENT_UIDS_PER_CALL)) {
+    if (deadlineAt - Date.now() < MIN_REMAINING_MS_TO_START) {
+      break; // Whatever wasn't reached simply stays unreported this round.
+    }
+    const structureLine = await client.uidFetchBodyStructure(uid);
+    if (!structureLine) {
+      byUid[uid] = { saved: [], skipped: [] };
+      continue;
+    }
+    const parts = parseBodyStructure(structureLine.text, structureLine.literals);
+    const textPart = selectTextPart(parts);
+    const attachmentParts = selectAttachmentParts(
+      parts,
+      textPart?.partNumber ?? null,
+      MAX_ATTACHMENTS_LISTED,
+    );
+    byUid[uid] = await saveAttachmentParts(
+      client,
+      uid,
+      attachmentParts,
+      req.saveDir,
+      deadlineAt,
+    );
+  }
+
+  return { status, byUid };
+};
+
+/**
  * Single entry point. The host executes this module's source inside a spawned
  * Node process and uses the return value as the script result, so nothing here
  * may write to stdout — that channel carries the JSON result.
@@ -241,6 +291,8 @@ export const run = async (req: WorkerRequest): Promise<unknown> => {
         return await markSeen(client, req);
       case 'body':
         return await body(client, req);
+      case 'attachments':
+        return await attachmentsOp(client, req, deadlineAt);
       default: {
         const unknown = req as { op: string };
         throw new Error(`Unknown operation "${unknown.op}"`);
