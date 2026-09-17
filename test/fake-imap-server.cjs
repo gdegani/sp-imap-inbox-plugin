@@ -289,11 +289,15 @@ const startFakeImapServer = (options = {}) => {
             send(`${tag} NO STARTTLS not supported by this fake`);
             return;
           }
-          send(`${tag} OK begin TLS negotiation`);
           if (state.injectBeforeStartTls) {
             // The plaintext-injection attack: data "pre-sent" for a command the
-            // client has not issued yet. A correct client must refuse it.
-            send('* OK injected before the handshake');
+            // client has not issued yet. A correct client must refuse it. Both
+            // lines are written in one socket.write() so they always land in
+            // the same TCP segment — two separate writes can be delivered as
+            // separate 'data' events, racing the client's post-STARTTLS check.
+            socket.write(`${tag} OK begin TLS negotiation\r\n* OK injected before the handshake\r\n`);
+          } else {
+            send(`${tag} OK begin TLS negotiation`);
           }
           const plain = socket;
           plain.removeAllListeners('data');
