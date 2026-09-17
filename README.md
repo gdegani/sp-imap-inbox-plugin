@@ -72,29 +72,38 @@ trust any third-party plugin.
 
 ### How attachments get saved
 
-A message's real attachment files are fetched and written to disk as a side
-effect of `taskCreated` — the same local-only hook that flags the message
-`\Seen` (see "Marking imported mail as read") — not during the lazy body
-fetch, because only `taskCreated` carries the local task id `updateTask`
-needs. The two run back-to-back off the same debounced batch, in one worker
-call per account: `BODYSTRUCTURE` first, then one `BODY.PEEK[n]` per
-qualifying part, decoded and written under **Save attachments to** (an
-advanced field next to the connection settings; defaults to
-`~/Documents/SuperProductivity IMAP Attachments` if left blank). Saved files
-are named `<uid>_<sanitized filename>` — the original filename is
-attacker-controlled (it comes straight off the message), so path separators,
-control characters and leading dots are stripped before it ever touches the
-filesystem. The task then gets a `FILE`-type attachment pointing at that path,
-which Super Productivity opens with the OS default handler on click; the
-host's own `openPath` guard (not this plugin) is what keeps a
-disguised-as-a-document executable from running on open.
+A message's real attachment files are fetched and written to disk right
+after its task is created — from two different call sites, since a plugin
+has no single hook that covers both ways a task can come into existence
+here:
 
-A fetch/save failure here is never surfaced — the task and its mark-as-read
-already happened independently, and a missing attachment isn't worth
-interrupting the import for. Since this rides on `taskCreated`, it inherits
-that hook's own limitation: mail imported through **"Import new mail now"**
-doesn't get attachments saved either, for the same reason it isn't flagged
-`\Seen` (see "Manual controls").
+- **Automatic import:** the `taskCreated` hook, the same local-only trigger
+  that flags the message `\Seen` (see "Marking imported mail as read"). The
+  two run back-to-back off the same debounced batch, one worker call per
+  account.
+- **Manual import** (`"Import new mail now"`, see "Manual controls"): inline,
+  right after the batch of `addTask` calls, using the task id each `addTask`
+  call returns and the password already resolved for that request (never a
+  second secret lookup, which matters for a typed-but-not-saved password).
+
+Both paths call the same worker op and the same `saveGroupAttachments`
+helper: `BODYSTRUCTURE` first, then one `BODY.PEEK[n]` per qualifying part,
+decoded and written under **Save attachments to** (an advanced field next to
+the connection settings; defaults to `~/Documents/SuperProductivity IMAP
+Attachments` if left blank — the manual path has no form field for this, so
+it always uses whichever folder the matching issue-provider account resolved
+to, or that default). Saved files are named `<uid>_<sanitized filename>` —
+the original filename is attacker-controlled (it comes straight off the
+message), so path separators, control characters and leading dots are
+stripped before it ever touches the filesystem. The task then gets a
+`FILE`-type attachment pointing at that path, which Super Productivity opens
+with the OS default handler on click; the host's own `openPath` guard (not
+this plugin) is what keeps a disguised-as-a-document executable from running
+on open.
+
+A fetch/save failure here is never surfaced — the task (and, for automatic
+import, its mark-as-read) already happened independently, and a missing
+attachment isn't worth interrupting the import for.
 
 This needed a new permission, `updateTask` (declared in `manifest.json`), on
 top of what the plugin already had — upgrading from an older install may
@@ -130,7 +139,11 @@ mailbox without waiting for the next automatic poll, next to the existing
   task, these aren't linked back to the message (no from/date fields, no
   "view issue" panel) and aren't flagged `\Seen` automatically, since both
   of those depend on the host's own issue-provider linkage, which a plugin
-  can't set through the public `addTask` API.
+  can't set through the public `addTask` API. Real attachment content *is*
+  still fetched and linked to the task, the same as an automatic import (see
+  "How attachments get saved") — that part only needs the task id `addTask`
+  returns, not the issue-provider linkage the rest of this paragraph is
+  about.
 
 Both require a password already entered or saved in the form above them,
 same as "Test connection". `Import new mail now` additionally needs the

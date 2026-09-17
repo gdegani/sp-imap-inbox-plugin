@@ -350,13 +350,12 @@ const toTaskAttachments = (
  */
 const saveGroupAttachments = async (
   source: string,
-  base: Omit<ImapConnectionCfg, 'password'>,
+  conn: ImapConnectionCfg,
   uids: number[],
   taskIdByUid: Map<number, string>,
 ): Promise<void> => {
   const saveDir = attachmentFolders.get(source) || DEFAULT_ATTACHMENTS_FOLDER;
   try {
-    const conn = await withPassword(base);
     const res = await callWorker<AttachmentsResult>({
       op: 'attachments',
       conn,
@@ -421,8 +420,16 @@ const flushPendingImports = async (): Promise<void> => {
     if (!base) {
       continue;
     }
+    let conn: ImapConnectionCfg;
     try {
-      const conn = await withPassword(base);
+      conn = await withPassword(base);
+    } catch (err) {
+      // No password, no connection — neither mark-as-read nor attachments
+      // are reachable for this account right now.
+      PluginAPI.log.err('[imap-inbox] could not flag imported mail as read', err);
+      continue;
+    }
+    try {
       const res = await callWorker<MarkSeenResult>({
         op: 'markSeen',
         conn,
@@ -440,7 +447,7 @@ const flushPendingImports = async (): Promise<void> => {
       PluginAPI.log.err('[imap-inbox] could not flag imported mail as read', err);
     }
 
-    await saveGroupAttachments(group.source, base, group.uids, group.taskIdByUid);
+    await saveGroupAttachments(group.source, conn, group.uids, group.taskIdByUid);
   }
 };
 
@@ -899,9 +906,10 @@ PluginAPI.onMessage?.(async (raw: unknown) => {
       // that has no task yet — a later check picks up exactly where this
       // one stopped instead of silently skipping it.
       let created = 0;
+      const taskIdByUid = new Map<number, string>();
       try {
         for (const m of poll.messages) {
-          await PluginAPI.addTask({
+          const taskId = await PluginAPI.addTask({
             title: m.subject,
             projectId,
             notes:
@@ -910,6 +918,7 @@ PluginAPI.onMessage?.(async (raw: unknown) => {
               'Unlike an automatic import, this task is not linked back to the ' +
               'message and is not marked read automatically.',
           });
+          taskIdByUid.set(m.uid, taskId);
           created += 1;
         }
       } finally {
@@ -922,6 +931,15 @@ PluginAPI.onMessage?.(async (raw: unknown) => {
           if (!isWatermarkUnchanged(current, next)) {
             await PluginAPI.persistDataSynced(serializeWatermark(next), key);
           }
+          // Best-effort, same as the automatic path — never throws (see
+          // saveGroupAttachments), so it can't turn a successful import into
+          // a reported failure.
+          await saveGroupAttachments(
+            sourceKey(account),
+            { ...account, password },
+            [...taskIdByUid.keys()],
+            taskIdByUid,
+          );
         }
       }
       return { created, isReset: false };
